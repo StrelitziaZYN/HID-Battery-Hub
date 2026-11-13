@@ -118,6 +118,7 @@ class TrayApp(QObject):
         self.flyout.history_requested.connect(lambda: self.open_console("stats"))
         self.flyout.device_clicked.connect(self.open_prompt)
         self.flyout.position_changed.connect(self._save_position)
+        self.flyout.preview_closed.connect(self._on_preview_closed)
 
     # ------------------------------------------------------------------ #
     def _build_menu(self):
@@ -183,8 +184,22 @@ class TrayApp(QObject):
             self._console.language_changed.connect(self._on_language_changed)
             # 材质/动效改动即时同步到托盘面板（面板不做 DWM 材质，但要跟着调通透度）
             self._console.appearance_changed.connect(self.flyout.apply_appearance)
+            self._console.panel_changed.connect(self.flyout.apply_appearance)
+            self._console.preview_requested.connect(self._on_preview_requested)
             self._console.set_status(self._status_text())
         return self._console
+
+    # ------------------------------------------------------------------ #
+    #: 预览：设置页点「预览」→ 在窗口旁边弹出真实电量面板，拖动滑块实时生效
+    def _on_preview_requested(self, on: bool):
+        if on:
+            self.flyout.show_preview(self._console)
+        else:
+            self.flyout.end_preview()
+
+    def _on_preview_closed(self):
+        if self._console is not None:
+            self._console.end_preview()
 
     def _on_language_changed(self):
         """语言切换后整窗重建：托盘菜单 / 弹出面板 / 设置窗口全部换新文案。"""

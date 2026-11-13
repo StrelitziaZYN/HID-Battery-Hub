@@ -76,9 +76,13 @@ _EN: dict[str, str] = {
         "Window material and UI motion — changes apply immediately",
     "窗口材质": "Window material",
     "电量面板不透明度": "Panel opacity",
-    "拖动即预览；低于 50% 时次要文字会变淡，投影始终保持不透明":
-        "Drag to preview; below 50% secondary text fades, while the shadow stays solid",
-    "2.4G 无线 · 示意数据": "2.4G wireless · sample data",
+    "点「预览」弹出电量面板；拖动滑块即时改变面板通透度":
+        "Click Preview to pop up the battery panel; dragging the slider changes its translucency live",
+    "预览": "Preview",
+    "收起预览": "Hide preview",
+    "弹出电量面板，拖动滑块即可实时查看效果":
+        "Pop up the battery panel so you can see changes as you drag",
+    "关闭电量面板": "Close the battery panel",
     "纯色": "Solid",
     "Mica 取壁纸的淡色，Acrylic 更明显；需要 Windows 11":
         "Mica takes a soft tint from the wallpaper; Acrylic is stronger. Requires Windows 11",

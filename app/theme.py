@@ -121,6 +121,7 @@ ICON = {
     "copy": "\uE8C8",
     "folder": "\uE838",
     "brush": "\uE790",
+    "preview": "\uE890",
 }
 
 

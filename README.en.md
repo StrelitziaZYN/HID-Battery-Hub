@@ -19,9 +19,9 @@ Current version **v1.4** · [Download the latest release](https://github.com/Str
 - **Appearance & motion**: under *General* you can pick a window material (Solid / Mica / Acrylic) and a motion level
   (Standard / Subtle / None), and turn hover feedback or window/page transitions off separately. Materials are Windows 11
   system backdrops tinted by your wallpaper; on systems without them the app falls back to solid, never to unreadable translucency.
-- **Panel opacity**: a 30–100% slider plus a numeric field, with a live preview that sits on your actual wallpaper and
-  uses the very same fill routine as the real flyout. Only the panel fill becomes translucent — the drop shadow and
-  rounded edge stay solid, so the panel never dissolves into the desktop.
+- **Panel opacity**: a 30–100% slider plus a numeric field. Click *Preview* to pop up the real flyout beside the
+  settings window; it turns translucent as you drag, so what you see is exactly what the tray panel looks like.
+  Only the panel fill becomes translucent — the drop shadow and rounded edge stay solid.
 - **Chinese & English UI**: switch under *General → 语言 / Language*; the whole interface, tray menu included, updates immediately.
 
 ## Screenshots

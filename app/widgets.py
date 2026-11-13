@@ -979,7 +979,14 @@ class FluentSlider(QSlider):
     交互自己接管（原生 QSlider 点击轨道只按 pageStep 跳，手感不对），
     但取值、键盘、禁用逻辑仍然复用 QSlider，不另造一套状态机。
     悬停/按下是 0..1 的补间，动效关掉时直接落终值。
+
+    布局：轨道两头各留 `GUTTER` 的内边距，钮走到 0% / 100% 时圆心落在
+    内边距里——这样悬停放大的钮和焦点圈都不会被控件边界裁掉，也不会顶到
+    右侧的数值框上（之前两端贴边，100% 时钮和输入框糊在一起）。
     """
+
+    GUTTER = 16.0                                  # 半钮 + 焦点圈 + 一点余量，两头都不贴边
+    HEIGHT = 28
 
     def __init__(self, parent=None, minimum: int = 0, maximum: int = 100, value: int = 0):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -987,7 +994,7 @@ class FluentSlider(QSlider):
         self.setSingleStep(1)
         self.setPageStep(max(1, (maximum - minimum) // 10))
         self.setValue(int(value))
-        self.setFixedHeight(26)
+        self.setFixedHeight(self.HEIGHT)
         self.setMinimumWidth(120)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
@@ -1005,10 +1012,16 @@ class FluentSlider(QSlider):
     def _handle_diameter(self) -> float:
         return 14.0 + 2.0 * self._hover - (2.0 if self._pressed else 0.0)
 
+    def _track_rect(self) -> QRectF:
+        """轨道矩形：左右各留 GUTTER，圆心正好压在轨道两端。"""
+        cy = self.height() / 2.0
+        left = self.GUTTER
+        return QRectF(left, cy - 2.0, max(1.0, self.width() - 2 * self.GUTTER), 4.0)
+
     def _value_at(self, x: float) -> int:
-        """把鼠标的 x 换算成取值：两头各留半个钮的宽度，滑到头才是极限值。"""
-        span = max(1.0, self.width() - 14.0)
-        ratio = max(0.0, min(1.0, (x - 7.0) / span))
+        """把鼠标的 x 换算成取值：与轨道绘制使用同一套内边距。"""
+        span = max(1.0, self.width() - 2 * self.GUTTER)
+        ratio = max(0.0, min(1.0, (x - self.GUTTER) / span))
         low, high = self.minimum(), self.maximum()
         return int(round(low + ratio * (high - low)))
 
@@ -1061,8 +1074,7 @@ class FluentSlider(QSlider):
         t = (self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
         d = self._handle_diameter()
         cy = self.height() / 2.0
-        left = d / 2.0
-        track = QRectF(left, cy - 2.0, max(1.0, self.width() - d), 4.0)
+        track = self._track_rect()
         cx = track.left() + track.width() * t
 
         accent = theme.C.ACCENT if enabled else QColor(120, 120, 120, 130)

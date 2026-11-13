@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
@@ -131,6 +132,8 @@ class ConsoleWindow(QWidget):
     refresh_requested = Signal()
     language_changed = Signal()
     appearance_changed = Signal()
+    panel_changed = Signal()                       # 只改了面板通透度：同步弹出面板即可
+    preview_requested = Signal(bool)               # 预览面板 打开/收起
     opened = Signal()
 
     def __init__(self, config: Dict[str, Any],
@@ -142,6 +145,7 @@ class ConsoleWindow(QWidget):
         self._current = "general"
         self._seen: set[str] = set()               # 已经展示过的页：首次不做淡入，避免闪
         self._material = "solid"
+        self._preview_at = 0.0                     # 上次打开预览的时间（失焦宽限用）
 
         motion.configure(config.get("ui"))
         self.setWindowTitle(branding.APP_NAME)
@@ -227,6 +231,8 @@ class ConsoleWindow(QWidget):
         self.iface_page.prompt_requested.connect(self.open_prompt)
         self.general_page.language_changed.connect(self.language_changed)
         self.general_page.appearance_changed.connect(self.apply_appearance)
+        self.general_page.panel_opacity_changed.connect(self.panel_changed)
+        self.general_page.preview_requested.connect(self._on_preview_requested)
 
         shell.addWidget(content, 1)
         self._pages = {"general": self.general_page,
@@ -254,6 +260,41 @@ class ConsoleWindow(QWidget):
         self.config_changed.emit()
 
     # ------------------------------------------------------------------ #
+    #: 预览（设置页点「预览」→ 主程序在窗口旁弹出真实电量面板）
+    def _on_preview_requested(self, on: bool):
+        if on:
+            # 置顶弹出的一瞬间 Windows 可能把焦点从本窗口拿走，记下时间做宽限，
+            # 免得刚弹出就被自己的「失焦收预览」逻辑关掉。
+            self._preview_at = time.monotonic()
+        self.preview_requested.emit(bool(on))
+
+    def end_preview(self):
+        """预览面板被关掉了（Esc / 托盘 / 面板自身收起）：按钮回到未选中。"""
+        self.general_page.set_previewing(False)
+
+    def _stop_preview(self):
+        """窗口收起、切到别的页或窗口失活时，预览没有意义了，一并收掉。"""
+        if not self.general_page.is_previewing():
+            return
+        self.general_page.set_previewing(False)
+        self.preview_requested.emit(False)
+
+    def event(self, ev):                           # noqa: N802
+        # 用户点了别的窗口（含别的程序）→ 预览面板跟着收；宽限期内忽略
+        if (ev.type() == ev.Type.WindowDeactivate
+                and time.monotonic() - self._preview_at > 0.4):
+            self._stop_preview()
+        return super().event(ev)
+
+    def hideEvent(self, event):                    # noqa: N802
+        super().hideEvent(event)
+        self._stop_preview()
+
+    def closeEvent(self, event):                   # noqa: N802
+        self._stop_preview()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------ #
     def set_status(self, text: str):
         self.nav_status.setText(text)
 
@@ -272,6 +313,8 @@ class ConsoleWindow(QWidget):
         page = self._pages.get(key)
         if page is None:
             key, page = "general", self.general_page
+        if key != "general":
+            self._stop_preview()                   # 离开通用页：预览面板跟着收起
         self._current = key
         for name, item in self._nav.items():
             item.setChecked(name == key)

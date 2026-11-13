@@ -3,14 +3,16 @@
 用法：
     python tools/publish_release.py                      # 用缓存的 git 凭据
     python tools/publish_release.py --token ghp_xxx      # 或显式传 PAT
+    python tools/publish_release.py --withdraw           # 撤回同名 Release 与 tag 后重发
 
 做的事：
     1. 取 token（--token / GITHUB_TOKEN / `git credential fill` 读 Windows 凭据管理器）
     2. GET /user 确认身份与仓库访问
-    3. 从 CHANGELOG.md 抽当前版本小节当发布说明
-    4. 建 Release（已存在则 PATCH 覆盖说明），tag 由 git 侧已推好
-    5. 上传 release/*.zip 作为资产（同名资产先删后传）
-    6. 打印资产列表、大小与 SHA256
+    3. 可选 --withdraw：删掉同名 tag 的 Release 与远端 tag（本地 tag 需另外 `git tag -d`）
+    4. 从 CHANGELOG.md 抽当前版本小节当发布说明
+    5. 建 Release（已存在则 PATCH 覆盖说明），tag 由 git 侧已推好
+    6. 上传 release/*.zip 作为资产（同名资产先删后传）
+    7. 打印资产列表、大小与 SHA256
 token 只在本进程内存里用，不落盘、不写进 .git/config。
 """
 from __future__ import annotations
@@ -133,6 +135,8 @@ def main() -> int:
     ap.add_argument("--owner", default="StrelitziaZYN")
     ap.add_argument("--repo", default="HID-Battery-Hub")
     ap.add_argument("--tag", default=f"v{VERSION}")
+    ap.add_argument("--withdraw", action="store_true",
+                    help="先撤回同名版本的 Release 与远端 tag，再按当前代码重新发布")
     args = ap.parse_args()
 
     token = args.token.strip() or token_from_git()
@@ -144,6 +148,17 @@ def main() -> int:
         print(f"ERROR: token 不可用（{code}）{me.get('message')}")
         return 3
     print(f"[auth] {me['login']}（token 长度 {len(token)}，不落盘）")
+
+    if args.withdraw:
+        code, old = api("GET", f"{API}/repos/{args.owner}/{args.repo}/releases/tags/{args.tag}", token)
+        if code == 200:
+            code, info = api("DELETE",
+                             f"{API}/repos/{args.owner}/{args.repo}/releases/{old['id']}", token)
+            print(f"[withdraw] 删除 Release {args.tag} → {code}")
+        else:
+            print(f"[withdraw] 没有已存在的 Release {args.tag}（{code}）")
+        code, info = api("DELETE", f"{API}/repos/{args.owner}/{args.repo}/git/refs/tags/{args.tag}", token)
+        print(f"[withdraw] 删除远端 tag {args.tag} → {code}")
 
     rel_dir = ROOT / "release"
     portable = rel_dir / f"{EXE_STEM}_v{VERSION}_win64.zip"

@@ -225,6 +225,7 @@ class Flyout(QWidget):
     history_requested = Signal()
     device_clicked = Signal(dict)
     position_changed = Signal()
+    preview_closed = Signal()                      # 预览面板自己收起了（Esc / 外部关闭）
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
@@ -233,6 +234,7 @@ class Flyout(QWidget):
         self._drag_offset: QPoint | None = None
         self._closing = False
         self._was_active = False
+        self._pinned = False                       # 预览模式：置顶、不抢焦点、不失焦收起
         self._anim: QPropertyAnimation | None = None
         self._fade: QPropertyAnimation | None = None
 
@@ -416,6 +418,9 @@ class Flyout(QWidget):
         return self._target_rect()
 
     def popup(self):
+        if self._pinned:                           # 预览中再点托盘：先把预览收起
+            self.end_preview()
+            return
         if self.is_showing():
             self.hide_animated()
             return
@@ -465,6 +470,56 @@ class Flyout(QWidget):
         self._closing = False
         self.setWindowOpacity(1.0)
 
+    # ------------------------------------------------------------------ #
+    def _preview_rect(self, anchor: QWidget | None) -> QRect:
+        """贴在设置窗口右侧（放不下就左侧），顶部对齐，整体不出屏。"""
+        self._fit()
+        w, h = self.width(), self.height()
+        if anchor is None:
+            return self._target_rect()
+        geo = anchor.frameGeometry()
+        screen = (QGuiApplication.screenAt(geo.center())
+                  or QGuiApplication.primaryScreen())
+        area = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        x = geo.right() + 12
+        if x + w > area.right() - 6:
+            x = geo.left() - w - 12
+        if x < area.left() + 6:
+            x = max(area.left() + 6, area.right() - w - 6)
+        y = min(max(geo.top() + 8, area.top() + 6), area.bottom() - h - 6)
+        return QRect(x, y, w, h)
+
+    def show_preview(self, anchor: QWidget | None = None):
+        """预览模式：从设置窗口旁边弹出真实面板，跟着「材质 / 不透明度」实时变。
+
+        与托盘弹出的区别：不抢窗口焦点（用户还在拖滑块）、不做失焦自动收起、
+        并置顶压在设置窗口之上——否则拖一次滑块面板就没了，看不见效果。
+        """
+        if self._closing:
+            self._cancel_fade()
+        if not self.isVisible():
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # 不激活窗口就显示：焦点留在设置窗口，拖动滑块不会被打断
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._pinned = True
+        self._watchdog.stop()
+        self._hide_timer.stop()
+        self.setGeometry(self._preview_rect(anchor))
+        self.setWindowOpacity(1.0)
+        self.show()
+        self.raise_()
+        if callable(self.request_refresh):
+            self.request_refresh()
+
+    def end_preview(self):
+        """退出预览：淡出收起（动效关闭时直接隐藏）。"""
+        if not self._pinned:
+            return
+        if not self.isVisible():
+            self._on_hidden()                      # 没显示过：直接把状态收干净
+            return
+        self.hide_animated()
+
     def hide_animated(self):
         if not self.isVisible():
             return
@@ -487,10 +542,18 @@ class Flyout(QWidget):
         self.hide()
         self.setWindowOpacity(1.0)
         self._watchdog.stop()
+        if self._pinned:
+            # 预览结束：撤掉置顶与「不激活显示」，并让设置页的「预览」按钮回到未选中
+            self._pinned = False
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+            self.preview_closed.emit()
 
     # ------------------------------------------------------------------ #
     def on_user_moved(self):
         """拖动结束后记住位置，下次点击托盘直接出现在这里。"""
+        if self._pinned:                           # 预览时挪动面板不覆盖托盘位置记忆
+            return
         pos = self.pos()
         self.config["window_pos"] = [int(pos.x()), int(pos.y())]
         self.position_changed.emit()
@@ -523,7 +586,7 @@ class Flyout(QWidget):
         super().mouseReleaseEvent(event)
 
     def _maybe_hide(self):
-        if not self.isVisible() or self._closing:
+        if self._pinned or not self.isVisible() or self._closing:
             return
         self.hide_animated()
 
@@ -532,6 +595,9 @@ class Flyout(QWidget):
 
         加「拿到过焦点」这个前置条件，是为了避免 Windows 拒绝前台激活时把面板误关掉。
         """
+        if self._pinned:                           # 预览模式不做失焦收起
+            self._watchdog.stop()
+            return
         if not self.is_showing():
             self._watchdog.stop()
             return
@@ -543,12 +609,12 @@ class Flyout(QWidget):
         self.hide_animated()
 
     def event(self, ev):                           # noqa: N802
-        if ev.type() == ev.Type.WindowDeactivate:
-            self._hide_timer.start()
+        if ev.type() == ev.Type.WindowDeactivate and not self._pinned:
+            self._hide_timer.start()               # 预览时失焦不收起，否则拖滑块就看不见了
         return super().event(ev)
 
     def keyPressEvent(self, event):                # noqa: N802
         if event.key() == Qt.Key.Key_Escape:
-            self.hide_animated()
+            self.end_preview() if self._pinned else self.hide_animated()
             return
         super().keyPressEvent(event)

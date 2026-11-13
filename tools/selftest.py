@@ -604,7 +604,7 @@ def t_motion():
 
 
 def t_panel_opacity():
-    """面板不透明度：夹取、换算、预览与真实面板同源、滑块与输入框联动。"""
+    """面板不透明度：夹取、换算、真实面板联动、滑块与输入框对齐、预览收起。"""
     from app import motion, settings_page, theme
     from app.ui import Flyout
 
@@ -626,28 +626,65 @@ def t_panel_opacity():
             assert abs(half - base / 2) <= 1, f"{material} 50% 应约 {base/2}，实际 {half}"
             assert theme.panel_fill(material, 0).alpha() >= 1, "alpha 归零会让面板彻底消失"
 
-        # 3) 真实面板与设置页预览必须同源（同一个计算函数）
+        # 3) 真实面板：底色按不透明度算，且预览模式下也不抢焦点（不置顶则重设）
         motion.configure({"material": "mica", "panel_opacity": 62})
         fly = Flyout({"ui": motion.state()})
         fly.apply_appearance()
         want = theme.panel_fill("mica", 62).alpha()
         assert fly.surface.fill().alpha() == want, "弹出面板底色没按不透明度计算"
+        fly.show_preview(None)
+        _pump(60)
+        assert fly._pinned, "预览模式没生效（应保持常显、不被失焦收起）"
+        motion.set_panel_opacity(45)
+        fly.apply_appearance()
+        assert fly.surface.fill().alpha() == theme.panel_fill("mica", 45).alpha(), \
+            "预览面板没跟着不透明度实时变"
+        closed = []
+        fly.preview_closed.connect(lambda: closed.append(True))
+        fly.end_preview()
+        _pump(300)
+        assert not fly._pinned and not fly.isVisible(), "预览没收起"
+        assert closed, "收起预览应通知设置页复位按钮"
         fly.deleteLater()
 
-        # 4) 设置页联动：滑块 ↔ 输入框 ↔ 预览 ↔ 配置
+        # 4) 设置页：滑块 ↔ 输入框 ↔ 配置，且不再内置仿制预览
         cfg = {"ui": dict(motion.state()), "profiles": []}
         page = settings_page.GeneralSettingsPage(cfg)
         page.show()
         _pump(60)
+        assert not hasattr(page, "preview"), "设置页内的仿制预览应已移除"
+        assert page.btn_preview.text() != "", "缺少「预览」按钮"
 
+        live = []
+        page.panel_opacity_changed.connect(lambda: live.append(True))
         page.opacity_slider.setValue(40)
         _pump(60)
         assert page.opacity_value.text() == "40", f"输入框没跟滑块同步：{page.opacity_value.text()!r}"
-        assert page.preview.card.fill().alpha() == theme.panel_fill("mica", 40).alpha(), "预览没跟着滑块变"
         assert motion.panel_opacity() == 40, "拖动后应立即生效（内存态）"
+        assert live, "拖动时应立刻通知真实面板刷新，而不是等落盘"
         _pump(420)                                     # 防抖 320ms 后才落盘
         assert cfg["ui"].get("panel_opacity") == 40, \
             f"防抖落盘没生效：{cfg['ui'].get('panel_opacity')}"
+
+        # 滑块两端的钮必须完整画在控件内，不能压到右边的数值框上
+        for value in (motion.OPACITY_MIN, motion.OPACITY_MAX):
+            page.opacity_slider.setValue(value)
+            _pump(30)
+            d = page.opacity_slider._handle_diameter()
+            track = page.opacity_slider._track_rect()
+            t = (value - motion.OPACITY_MIN) / (motion.OPACITY_MAX - motion.OPACITY_MIN)
+            cx = track.left() + track.width() * t
+            outer = d / 2 + 2.5 + 1                    # 钮半径 + 焦点圈 + 笔宽
+            assert cx - outer >= 0 and cx + outer <= page.opacity_slider.width(), \
+                f"{value}% 时滑块钮被裁切（cx={cx:.1f}，半宽 {outer:.1f}）"
+            assert page.opacity_slider.width() - (cx + outer) >= 4, \
+                f"{value}% 时滑块钮贴死控件右边，会压住数值框"
+
+        # 按钮与面板状态要一一对应（预览开着却显示「预览」就是状态分叉）
+        page.set_previewing(True)
+        assert page.is_previewing() and page.btn_preview.text() != "预览"
+        page.set_previewing(False)
+        assert not page.is_previewing()
 
         page.opacity_value.setText("76")
         page.opacity_value.editingFinished.emit()
@@ -673,7 +710,7 @@ def t_panel_opacity():
         assert "panel_opacity" in ui, "默认配置缺少 panel_opacity"
         assert ui["panel_opacity"] == motion.OPACITY_MAX, "默认应为完全不透明的 100%"
         detail = (f"{motion.OPACITY_MIN}–{motion.OPACITY_MAX}% / mica 100%→{theme.card_alpha('mica')}"
-                  f" 50%→{theme.panel_fill('mica', 50).alpha()} / 联动与夹取正常")
+                  f" 50%→{theme.panel_fill('mica', 50).alpha()} / 预览面板实时联动")
     finally:
         settings_page.save_config = real_save
         motion.configure(old)
