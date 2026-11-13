@@ -69,7 +69,36 @@ _EN: dict[str, str] = {
         "Unknown — not onboarded yet; must be inferred from HID collections and command responses",
 
     # ---- 通用设置页 ----
-    "刷新节奏、开机行为与恢复出厂": "Refresh cadence, startup behavior & reset",
+    "窗口材质、动效，以及刷新与开机行为":
+        "Window material, motion, refresh & startup",
+    "外观与动效": "Appearance & Motion",
+    "窗口材质与界面动效，改动立即生效":
+        "Window material and UI motion — changes apply immediately",
+    "窗口材质": "Window material",
+    "电量面板不透明度": "Panel opacity",
+    "拖动即预览；低于 50% 时次要文字会变淡，投影始终保持不透明":
+        "Drag to preview; below 50% secondary text fades, while the shadow stays solid",
+    "2.4G 无线 · 示意数据": "2.4G wireless · sample data",
+    "纯色": "Solid",
+    "Mica 取壁纸的淡色，Acrylic 更明显；需要 Windows 11":
+        "Mica takes a soft tint from the wallpaper; Acrylic is stronger. Requires Windows 11",
+    "动效强度": "Motion intensity",
+    "标准": "Standard",
+    "柔和": "Subtle",
+    "无动效": "None",
+    "标准约 250ms，柔和减半，关闭则界面瞬时切换":
+        "Standard ≈ 250 ms, subtle is half, off switches instantly",
+    "悬停与按压反馈": "Hover & press feedback",
+    "按钮与列表行在鼠标移入时渐显底色":
+        "Buttons and list rows fade in their background on hover",
+    "窗口与页面过渡": "Window & page transitions",
+    "弹出面板淡入淡出，切换标签页时淡入":
+        "The flyout fades in and out, pages fade in when switching",
+    "已回退纯色": "Fell back to solid",
+    "当前系统不支持窗口材质（{}），按纯色显示":
+        "This system can't do window materials ({}); showing solid instead",
+    "材质由 Windows 11 提供；弹出面板跟随同一套通透度，不做二次模糊":
+        "Materials come from Windows 11; the flyout follows the same translucency without a second blur",
     "刷新与启动": "Refresh & Startup",
     "设备清单的刷新节奏与开机行为":
         "How often the device list refreshes, and startup behavior",
@@ -312,6 +341,9 @@ _EN: dict[str, str] = {
     "① 已连接的 HID 设备": "① Connected HID devices",
     "① 已连接的 HID 设备（{}）": "① Connected HID devices ({})",
     "重新检测": "Re-scan",
+    "设备型号": "Device model",
+    "名称看不出型号时填这里，例如 MCHOSE A7 V3 Pro；留空则由 AI 自行判断":
+        "Type the exact model if the name is generic, e.g. MCHOSE A7 V3 Pro; leave blank to let the AI decide",
     "② 接入提示词": "② Access Prompt",
     "提示词只包含本机实测信息，并要求 AI 返回一个 JSON 接入包；拿到后点「导入接入包」选中它，插件与接口配置会自动装好。":
         "The prompt contains only locally measured facts and asks the AI to return a JSON access bundle; once you have it, click \"Import Bundle\" and the plugin and profiles install automatically.",
@@ -326,8 +358,7 @@ _EN: dict[str, str] = {
     "正在补全设备信息…": "Fetching device details…",
     "{} 行 · {} 字": "{} lines · {} chars",
     "提示词已生成": "Prompt ready",
-    "该设备尚未接入，提示词将要求 AI 逆向协议":
-        "Device not onboarded — the prompt will ask the AI to reverse-engineer the protocol",
+    "提示词已按型号「{}」生成": "Prompt built for model \"{}\"",
     "已复制到剪贴板，粘贴给 AI Agent 即可": "Copied — paste it to your AI agent",
     "选择 AI 返回的接入包": "Choose the AI's access bundle",
     "接入包 (*.json *.py);;JSON (*.json);;插件 (*.py);;所有文件 (*.*)":

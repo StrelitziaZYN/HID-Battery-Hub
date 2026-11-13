@@ -16,6 +16,12 @@ Current version **v1.4** · [Download the latest release](https://github.com/Str
 - **Endurance estimates**: based on the last **30 days** of charge/discharge records you get two numbers — "estimated time left" from the median drain rate of recent discharge segments, and "full-charge endurance" from the longest full-charge-to-0% cycle, with the median as reference.
 - **Multi-vendor**: MCHOSE and Flydigi protocols are built in. For anything else, use the self-onboarding flow: *detect device → build prompt → hand it to an AI → drop the returned access bundle into the window*. No app update required.
 - **Bring your own icons**: upload a PNG (auto-cropped to 128 px) per device. The app never fetches images from the internet.
+- **Appearance & motion**: under *General* you can pick a window material (Solid / Mica / Acrylic) and a motion level
+  (Standard / Subtle / None), and turn hover feedback or window/page transitions off separately. Materials are Windows 11
+  system backdrops tinted by your wallpaper; on systems without them the app falls back to solid, never to unreadable translucency.
+- **Panel opacity**: a 30–100% slider plus a numeric field, with a live preview that sits on your actual wallpaper and
+  uses the very same fill routine as the real flyout. Only the panel fill becomes translucent — the drop shadow and
+  rounded edge stay solid, so the panel never dissolves into the desktop.
 - **Chinese & English UI**: switch under *General → 语言 / Language*; the whole interface, tray menu included, updates immediately.
 
 ## Screenshots

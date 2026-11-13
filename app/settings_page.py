@@ -11,21 +11,21 @@ import json
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPixmap
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QFrame,
                                QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QScrollArea, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from . import autostart, i18n, icon_store, plugin_store, theme
+from . import autostart, backdrop, i18n, icon_store, motion, plugin_store, theme
 from .paths import (CONFIG_DIR, DATA_DIR, DATA_DIR_NOTE, EXE_DIR, IS_FROZEN,
                     PLUGIN_DIR, USING_EXE_DIR)
 from .probe_page import ProbePanel
 from .profiles import default_config, new_profile, save_config
 from .protocols import all_protocols, get_protocol
-from .widgets import (Badge, Banner, ElidedLabel, FlatButton, IconButton, IconTile,
-                      ListRow, Surface, ToggleSwitch)
+from .widgets import (Badge, Banner, BatteryBar, ElidedLabel, FlatButton, FluentSlider,
+                      IconButton, IconTile, ListRow, Segmented, Surface, ToggleSwitch)
 
 INPUT_QSS = theme.INPUT_QSS
 
@@ -169,7 +169,8 @@ class ProfileRow(ListRow):
         on = bool(self.profile.get("enabled", True))
         self.set_dimmed(not on)
         self.name.setStyleSheet(f"color: {(theme.C.TEXT if on else theme.C.TEXT_SECONDARY).name()};")
-        self.summary.setStyleSheet(f"color: rgba(138, 138, 138, {255 if on else 150});")
+        self.summary.setStyleSheet(
+            f"color: {theme.rgba(theme.tint(theme.C.TEXT_TERTIARY, 255 if on else 150))};")
 
 
 class IconRow(ListRow):
@@ -354,14 +355,226 @@ class SettingsPageBase(QWidget):
         return hint + 12 + 28 + 6 + 12
 
 
+def _desktop_wallpaper() -> QPixmap | None:
+    """读当前桌面壁纸；纯色壁纸时注册表里是空串，返回 None 由预览自己铺底。"""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as key:
+            path = str(winreg.QueryValueEx(key, "Wallpaper")[0] or "")
+        if path and os.path.exists(path):
+            pm = QPixmap(path)
+            if not pm.isNull():
+                return pm
+    except Exception:                              # noqa: BLE001
+        pass
+    return None
+
+
+class PanelPreview(QWidget):
+    """「面板不透明度」的实时预览。
+
+    底色走 `theme.panel_fill()`——和真实弹出面板**同一个函数**，所以预览里
+    看到的通透程度就是托盘面板的实际情况，不是另做一套近似值。
+    背景优先用当前桌面壁纸（读不到就用中性灰 + 两团色块），这样降低不透明度
+    时能直观看到「面板下面透出了什么」，而不是只看到白色变浅。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._material = "mica"
+        self._opacity = 100
+        self._wallpaper = _desktop_wallpaper()
+        self.setFixedHeight(138)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 13, 0, 13)
+        row.setSpacing(0)
+        row.addStretch(1)
+
+        self.card = Surface(radius=10)
+        self.card.setFixedWidth(300)
+        self.card.setFixedHeight(86)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 7)
+        shadow.setColor(QColor(0, 0, 0, 48))
+        self.card.setGraphicsEffect(shadow)
+        row.addWidget(self.card, 3, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+
+        body = QVBoxLayout(self.card)
+        body.setContentsMargins(14, 11, 14, 11)
+        body.setSpacing(2)
+        body.addStretch(1)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+        self.name = QLabel("MCHOSE A7 V3 Pro")
+        self.name.setFont(theme.ui_font(9, QFont.Weight.DemiBold))
+        self.name.setStyleSheet(f"color: {theme.C.TEXT.name()}; background: transparent;")
+        self.percent = QLabel("86%")
+        self.percent.setFont(theme.ui_font(10, QFont.Weight.DemiBold))
+        self.percent.setStyleSheet(f"color: {theme.C.TEXT.name()}; background: transparent;")
+        top.addWidget(self.name)
+        top.addStretch(1)
+        top.addWidget(self.percent)
+        body.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+        self.sub = QLabel(i18n.T("2.4G 无线 · 示意数据"))
+        self.sub.setFont(theme.ui_font(8))
+        self.sub.setStyleSheet(f"color: {theme.C.TEXT_TERTIARY.name()}; background: transparent;")
+        self.bar = BatteryBar(width=52, height=4)
+        self.bar.set_state(86)
+        bottom.addWidget(self.sub)
+        bottom.addStretch(1)
+        bottom.addWidget(self.bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        body.addLayout(bottom)
+        body.addStretch(1)
+
+        self.apply(self._material, self._opacity)
+
+    # ------------------------------------------------------------------ #
+    def apply(self, material: str, opacity: int):
+        self._material = material if material in motion.MATERIALS else "solid"
+        self._opacity = int(opacity)
+        self.card.set_fill(theme.panel_fill(self._material, self._opacity))
+        self.card.update()
+
+    def paintEvent(self, event):                   # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0, 0, 0, 0)
+        path = QPainterPath()
+        path.addRoundedRect(rect.adjusted(0, 4, 0, -4), 8, 8)
+        p.setClipPath(path)
+
+        # 底层：桌面壁纸；没有壁纸就铺一层中性灰
+        inner = rect.adjusted(0, 4, 0, -4)
+        if self._wallpaper is not None:
+            pm = self._wallpaper.scaled(inner.size().toSize(),
+                                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                        Qt.TransformationMode.SmoothTransformation)
+            sx = max(0, (pm.width() - int(inner.width())) // 2)
+            sy = max(0, (pm.height() - int(inner.height())) // 2)
+            p.drawPixmap(inner, pm, QRectF(sx, sy, inner.width(), inner.height()))
+        else:
+            p.fillRect(inner, QColor("#E6E6EC"))
+
+        # 面板下面「压着」的东西：两团低饱和块，降低不透明度时能看到它们透出来
+        p.setPen(Qt.PenStyle.NoPen)
+        w, h = inner.width(), inner.height()
+        for x0, y0, x1, y1, color in ((0.03, 0.10, 0.20, 0.90, QColor(255, 255, 255, 62)),
+                                      (0.78, 0.14, 0.97, 0.62, QColor(90, 120, 200, 46)),
+                                      (0.10, 0.62, 0.30, 0.88, QColor(0, 0, 0, 22))):
+            p.setBrush(color)
+            p.drawRoundedRect(QRectF(inner.left() + w * x0, inner.top() + h * y0,
+                                     w * (x1 - x0), h * (y1 - y0)), 7, 7)
+
+
 class GeneralSettingsPage(SettingsPageBase):
-    """区域一：通用设置（语言 / 刷新间隔 / 开机自启 / 恢复默认）。"""
+    """区域一：通用设置（外观材质 / 动效 / 面板不透明度 / 语言 / 刷新间隔 / 开机自启）。"""
 
     language_changed = Signal()
+    appearance_changed = Signal()
+
+    #: 材质键 → 显示名（Mica / Acrylic 是官方叫法，不翻译）
+    MATERIAL_NAMES = {"solid": "纯色", "mica": "Mica", "acrylic": "Acrylic"}
 
     def __init__(self, config: dict, embedded: bool = False, parent=None):
         super().__init__(config, i18n.T("通用设置"), embedded, parent,
-                         subtitle=i18n.T("刷新节奏、开机行为与恢复出厂"))
+                         subtitle=i18n.T("窗口材质、动效，以及刷新与开机行为"))
+
+        # ---------------- 模块一：外观与动效 ---------------- #
+        look = SectionCard(i18n.T("外观与动效"), "brush",
+                           i18n.T("窗口材质与界面动效，改动立即生效"), tone="violet")
+        self.material_badge = look.header_widget(Badge(i18n.T("纯色"), "neutral"))
+
+        self.material_seg = Segmented([("solid", i18n.T("纯色")),
+                                       ("mica", "Mica"),
+                                       ("acrylic", "Acrylic")])
+        self.material_seg.setFixedWidth(236)
+        self.material_seg.changed.connect(self._on_material)
+        look.body.addLayout(self._row(
+            i18n.T("窗口材质"), self.material_seg,
+            i18n.T("Mica 取壁纸的淡色，Acrylic 更明显；需要 Windows 11")))
+
+        # 面板不透明度：滑块拖动即时生效，落盘做 320ms 合并，避免连续拖动反复写盘
+        self.opacity_slider = FluentSlider(minimum=motion.OPACITY_MIN,
+                                           maximum=motion.OPACITY_MAX, value=100)
+        self.opacity_slider.setFixedWidth(172)
+        # 用 QLineEdit 而不是 QSpinBox：样式表一旦接管 QSpinBox，它的文本区会被算成
+        # 1px 宽（Qt 对 sub-control 的布局计算问题），数字直接看不见。
+        self.opacity_value = QLineEdit(str(motion.panel_opacity()))
+        self.opacity_value.setValidator(QIntValidator(motion.OPACITY_MIN,
+                                                      motion.OPACITY_MAX, self))
+        self.opacity_value.setAlignment(Qt.AlignmentFlag.AlignRight |
+                                        Qt.AlignmentFlag.AlignVCenter)
+        self.opacity_value.setFont(theme.ui_font(9))
+        self.opacity_value.setFixedWidth(46)
+        self.opacity_value.setStyleSheet(INPUT_QSS + "QLineEdit{padding:3px 6px;}")
+        self.opacity_value.editingFinished.connect(self._on_opacity_typed)
+        self.opacity_slider.valueChanged.connect(self._on_opacity)
+
+        pct = QLabel("%")
+        pct.setFont(theme.ui_font(9))
+        pct.setStyleSheet(f"color: {theme.C.TEXT_TERTIARY.name()};")
+
+        opacity_box = QWidget()
+        opacity_row = QHBoxLayout(opacity_box)
+        opacity_row.setContentsMargins(0, 0, 0, 0)
+        opacity_row.setSpacing(6)
+        opacity_row.addWidget(self.opacity_slider)
+        opacity_row.addWidget(self.opacity_value)
+        opacity_row.addWidget(pct)
+        look.body.addLayout(self._row(
+            i18n.T("电量面板不透明度"), opacity_box,
+            i18n.T("拖动即预览；低于 50% 时次要文字会变淡，投影始终保持不透明")))
+
+        self.preview = PanelPreview()
+        look.body.addWidget(self.preview)
+
+        # 拖动时每帧都会走 _on_opacity，落盘用一次性定时器合并
+        self._opacity_save = QTimer(self)
+        self._opacity_save.setSingleShot(True)
+        self._opacity_save.setInterval(320)
+        self._opacity_save.timeout.connect(self._flush_opacity)
+
+        self.motion_seg = Segmented([("full", i18n.T("标准")),
+                                     ("subtle", i18n.T("柔和")),
+                                     ("off", i18n.T("无动效"))])
+        self.motion_seg.setFixedWidth(206)
+        self.motion_seg.changed.connect(self._on_motion)
+        look.body.addLayout(self._row(
+            i18n.T("动效强度"), self.motion_seg,
+            i18n.T("标准约 250ms，柔和减半，关闭则界面瞬时切换")))
+
+        self.hover_switch = ToggleSwitch(True)
+        self.hover_switch.toggled.connect(
+            lambda checked: self._set_ui("hover", bool(checked)))
+        look.body.addLayout(self._row(
+            i18n.T("悬停与按压反馈"), self.hover_switch,
+            i18n.T("按钮与列表行在鼠标移入时渐显底色")))
+
+        self.transition_switch = ToggleSwitch(True)
+        self.transition_switch.toggled.connect(
+            lambda checked: self._set_ui("transitions", bool(checked)))
+        look.body.addLayout(self._row(
+            i18n.T("窗口与页面过渡"), self.transition_switch,
+            i18n.T("弹出面板淡入淡出，切换标签页时淡入")))
+
+        self.material_note = QLabel("")
+        self.material_note.setWordWrap(True)
+        self.material_note.setFont(theme.ui_font(7))
+        self.material_note.setStyleSheet(
+            f"color: {theme.C.TEXT_TERTIARY.name()}; padding: 2px 2px 0 2px;")
+        look.body.addWidget(self.material_note)
+        self.body.addWidget(look)
 
         card = SectionCard(i18n.T("刷新与启动"), "settings",
                            i18n.T("设备清单的刷新节奏与开机行为"), tone="slate")
@@ -418,6 +631,103 @@ class GeneralSettingsPage(SettingsPageBase):
         self.autostart_switch.setChecked(autostart.is_enabled())
         self.autostart_switch.blockSignals(False)
 
+        self._sync_look()
+
+    # ------------------------------------------------------------------ #
+    #: 外观与动效
+    def _sync_look(self):
+        ui = self.config.get("ui") or {}
+        for seg, key, fallback in ((self.material_seg, "material", "mica"),
+                                   (self.motion_seg, "motion", "full")):
+            seg.blockSignals(True)
+            seg.set_current(str(ui.get(key) or fallback), emit=False)
+            seg.blockSignals(False)
+        for switch, key in ((self.hover_switch, "hover"),
+                            (self.transition_switch, "transitions")):
+            switch.blockSignals(True)
+            switch.setChecked(bool(ui.get(key, True)))
+            switch.blockSignals(False)
+        # 以配置为准（页面重建/切语言后仍显示配置里的值），并把它回写给全局，
+        # 避免「界面显示 57% 但面板还是 100%」这种状态分叉。
+        opacity = motion.clamp_opacity(ui.get("panel_opacity", motion.panel_opacity()))
+        motion.set_panel_opacity(opacity)
+        self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(opacity)
+        self.opacity_slider.blockSignals(False)
+        self.opacity_value.setText(str(opacity))
+        self.preview.apply(motion.material(), opacity)
+        self._sync_material_badge()
+
+    # ------------------------------------------------------------------ #
+    #: 面板不透明度
+    def _on_opacity(self, value: int):
+        """拖动/输入时即时生效：内存 + 预览 + 真实面板，落盘延后合并。"""
+        value = motion.set_panel_opacity(value)
+        if self.opacity_slider.value() != value:
+            self.opacity_slider.blockSignals(True)
+            self.opacity_slider.setValue(value)
+            self.opacity_slider.blockSignals(False)
+        if self.opacity_value.text() != str(value):
+            self.opacity_value.setText(str(value))
+        self.preview.apply(motion.material(), value)
+        self._opacity_save.start()
+
+    def _on_opacity_typed(self):
+        """手输数值：回车/失焦时夹取到合法区间，非法输入退回当前值。"""
+        try:
+            value = motion.clamp_opacity(int(self.opacity_value.text().strip()))
+        except ValueError:
+            value = motion.panel_opacity()
+        self._on_opacity(value)
+
+    def _flush_opacity(self):
+        """停手 320ms 后落盘并通知主程序；值没变就不写。"""
+        ui = self.config.setdefault("ui", {})
+        value = motion.panel_opacity()
+        if ui.get("panel_opacity") == value:
+            return
+        ui["panel_opacity"] = value
+        try:
+            save_config(self.config)
+        except Exception:                          # noqa: BLE001
+            pass
+        self.appearance_changed.emit()
+
+    def _sync_material_badge(self):
+        wanted = motion.material()
+        supported, why = backdrop.describe()
+        if wanted != "solid" and not supported:
+            self.material_badge.setText(i18n.T("已回退纯色"), "warn")
+            self.material_note.setText(
+                i18n.TF("当前系统不支持窗口材质（{}），按纯色显示", why))
+            return
+        name = i18n.T(self.MATERIAL_NAMES.get(wanted, "纯色"))
+        self.material_badge.setText(name, "neutral" if wanted == "solid" else "accent")
+        self.material_note.setText(i18n.T(
+            "材质由 Windows 11 提供；弹出面板跟随同一套通透度，不做二次模糊"))
+
+    def _set_ui(self, key: str, value):
+        """只改外观偏好：直接落盘 + 通知界面重贴材质，不触发设备重扫。"""
+        ui = self.config.setdefault("ui", {})
+        if ui.get(key) == value:
+            return
+        ui[key] = value
+        # 滑块可能刚被拖到新值但还没落盘，configure 会按配置整体覆盖，先接住它
+        ui["panel_opacity"] = motion.panel_opacity()
+        motion.configure(ui)
+        try:
+            save_config(self.config)
+        except Exception:                          # noqa: BLE001
+            pass
+        self._sync_look()
+        self.appearance_changed.emit()
+
+    def _on_material(self, key: str):
+        self._set_ui("material", key)
+
+    def _on_motion(self, key: str):
+        self._set_ui("motion", key)
+
     def _on_interval(self, _index: int):
         self.config["refresh_interval"] = int(self.interval.currentData())
         self._commit()
@@ -433,13 +743,16 @@ class GeneralSettingsPage(SettingsPageBase):
 
     def _reset(self):
         old_lang = self.config.get("language", "zh")
+        self._opacity_save.stop()                  # 别让重置前那次拖动在重置后又写回去
         self.config.clear()
         self.config.update(json.loads(json.dumps(default_config())))
+        motion.configure(self.config.get("ui"))
         if self.config.get("language", "zh") != old_lang:
             i18n.set_language(self.config["language"])
             self.language_changed.emit()
         self.reload(self.config)
         self._commit()
+        self.appearance_changed.emit()
 
     def _on_language(self, _index: int):
         code = self.combo_lang.currentData()

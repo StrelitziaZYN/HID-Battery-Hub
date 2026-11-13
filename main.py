@@ -181,6 +181,8 @@ class TrayApp(QObject):
             self._console.refresh_requested.connect(self.refresh)
             self._console.opened.connect(self.flyout.hide_animated)
             self._console.language_changed.connect(self._on_language_changed)
+            # 材质/动效改动即时同步到托盘面板（面板不做 DWM 材质，但要跟着调通透度）
+            self._console.appearance_changed.connect(self.flyout.apply_appearance)
             self._console.set_status(self._status_text())
         return self._console
 
@@ -433,7 +435,11 @@ def main() -> int:
     app.setFont(theme.ui_font(9))
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
-        print(i18n.T("系统托盘不可用"))
+        # 打包成 --windowed 后没有控制台，sys.stdout 是 None，直接 print 会抛异常退出
+        try:
+            print(i18n.T("系统托盘不可用"))
+        except Exception:                          # noqa: BLE001
+            pass
         return 1
 
     tray = TrayApp(app)

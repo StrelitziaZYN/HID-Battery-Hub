@@ -27,6 +27,16 @@ from app.ui import Flyout  # noqa: E402
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots")
 
 
+def _settle(app: QApplication, ms: int = 320):
+    """等进场动效跑完再截图，否则会拍到淡入到一半的半透明界面。"""
+    import time
+
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
 def _demo_icon(path: str) -> None:
     """生成一张示例图，模拟用户上传的照片（仅用于截图，不进入正式资源）。"""
     image = QImage(96, 96, QImage.Format.Format_ARGB32)
@@ -63,14 +73,15 @@ def main() -> int:
     devices = scan_devices(config)
     flyout.devices_page.set_devices(devices)
     flyout.show()
-    app.processEvents()
+    _settle(app)
     flyout.grab().save(os.path.join(OUT, f"devices{suffix}.png"))
 
     console = ConsoleWindow(config, lambda: list(devices))
     console.show()
+    _settle(app, 420)
     for key, name in (("stats", "history"), ("general", "general"), ("iface", "settings")):
         console.open_page(key)
-        app.processEvents()
+        _settle(app, 260)
         console.grab().save(os.path.join(OUT, name + suffix + ".png"))
     console.close()
 

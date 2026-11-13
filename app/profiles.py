@@ -4,6 +4,13 @@
     {
       "config_version": 2,
       "refresh_interval": 60,
+      "ui": {
+        "material": "mica",          # solid | mica | acrylic（窗口材质）
+        "motion": "full",            # full | subtle | off（动效强度）
+        "hover": true,               # 悬停与按压反馈
+        "transitions": true,         # 窗口与页面过渡
+        "panel_opacity": 100         # 电量面板不透明度（30..100，百分比）
+      },
       "profiles": [
         {
           "id": "mchose-v2",
@@ -93,12 +100,20 @@ def _with_defaults(profile: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+def _ui_defaults() -> Dict[str, Any]:
+    """外观与动效默认值（单一来源在 motion.py，避免两处各写一份）。"""
+    from .motion import defaults
+
+    return defaults()
+
+
 def default_config() -> Dict[str, Any]:
     return {
         "config_version": CONFIG_VERSION,
         "refresh_interval": 60,
         "record_interval": 300,
         "language": "zh",
+        "ui": _ui_defaults(),
         "profiles": [_with_defaults(dict(p)) for p in _SEED],
     }
 
@@ -146,6 +161,11 @@ def load_config() -> Dict[str, Any]:
     data.setdefault("refresh_interval", 60)
     data.setdefault("record_interval", 300)
     data.setdefault("config_version", CONFIG_VERSION)
+    # 老配置没有 ui 段：就地补齐，用户下次改设置时自然写回文件
+    ui = data.get("ui")
+    data["ui"] = dict(ui) if isinstance(ui, dict) else {}
+    for key, value in _ui_defaults().items():
+        data["ui"].setdefault(key, value)
     data["profiles"] = [_with_defaults(p) for p in data["profiles"]]
     return data
 

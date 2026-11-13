@@ -120,6 +120,7 @@ ICON = {
     "terminal": "\uE756",
     "copy": "\uE8C8",
     "folder": "\uE838",
+    "brush": "\uE790",
 }
 
 
@@ -128,6 +129,65 @@ def tint(color: QColor, alpha: int) -> QColor:
     c = QColor(color)
     c.setAlpha(max(0, min(255, alpha)))
     return c
+
+
+def mix(a: QColor, b: QColor, t: float) -> QColor:
+    """按进度 t（0..1）在两色之间插值，含 alpha——悬停/按压的渐变都靠它。"""
+    t = max(0.0, min(1.0, float(t)))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+        round(a.alpha() + (b.alpha() - a.alpha()) * t),
+    )
+
+
+def rgba(color: QColor) -> str:
+    """QColor → `rgba(r,g,b,a)` 字符串，供样式表用。
+
+    注意 alpha 必须写 0..255 的整数：Qt 样式表不认 0..1 的浮点透明度，
+    写成 0.588 会被当成无效值、整条背景规则退化成不透明，材质就透不出来。
+    """
+    return (f"rgba({color.red()},{color.green()},{color.blue()},"
+            f"{max(0, min(255, color.alpha()))})")
+
+
+# --------------------------------------------------------------------------- #
+# 窗口材质（Mica / Acrylic）下的底色
+# 系统材质只会透出「窗口底色」的透明度，所以底色越透材质越明显；
+# Acrylic 的壁纸色彩更强，压一层更实的遮罩，保证正文对比度不掉。
+_SCRIM = {"solid": (249, 249, 249, 255), "mica": (249, 249, 249, 132),
+          "acrylic": (250, 250, 250, 158)}
+_NAV_SCRIM = {"solid": (243, 243, 243, 255), "mica": (243, 243, 243, 108),
+              "acrylic": (243, 243, 243, 132)}
+#: 卡片与弹出面板的底色透明度：材质开启时略透，让壁纸色透出来一点
+_CARD_ALPHA = {"solid": 246, "mica": 234, "acrylic": 216}
+
+
+def scrim(material: str) -> QColor:
+    r, g, b, a = _SCRIM.get(material, _SCRIM["solid"])
+    return QColor(r, g, b, a)
+
+
+def nav_scrim(material: str) -> QColor:
+    r, g, b, a = _NAV_SCRIM.get(material, _NAV_SCRIM["solid"])
+    return QColor(r, g, b, a)
+
+
+def card_alpha(material: str) -> int:
+    return _CARD_ALPHA.get(material, _CARD_ALPHA["solid"])
+
+
+def panel_fill(material: str, opacity: int = 100) -> QColor:
+    """弹出面板的底色：材质基准 alpha × 用户设定的不透明度。
+
+    面板本体与设置页里的实时预览都走这一个函数，避免「预览和实际不一样」。
+    `opacity` 是 0..100 的百分比；低于 30% 时文字会糊在桌面内容里，
+    范围限制由 `motion.OPACITY_MIN` 负责，这里只做兜底夹取。
+    """
+    ratio = max(0, min(100, int(opacity))) / 100
+    alpha = max(1, min(255, round(card_alpha(material) * ratio)))
+    return tint(C.WINDOW, alpha)
 
 
 def apply_shadow_color(widget: QWidget, color: QColor) -> None:

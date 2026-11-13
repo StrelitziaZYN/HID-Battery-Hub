@@ -7,13 +7,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QPoint, QPropertyAnimation,
+from PySide6.QtCore import (QAbstractAnimation, QPoint, QPropertyAnimation,
                             QRect, Qt, QTimer, Signal)
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
                                QLabel, QScrollArea, QVBoxLayout, QWidget)
 
-from . import branding, i18n, theme, winapi
+from . import branding, i18n, motion, theme, winapi
 from .widgets import DeviceRow, DragArea, IconButton, Surface
 
 
@@ -139,11 +139,15 @@ class DevicesPage(QWidget):
                 w.deleteLater()
         self._rows = []
 
-        for dev in devices:
+        stagger = self.isVisible() and motion.transitions_enabled()
+        for index, dev in enumerate(devices):
             row = DeviceRow(dev)
             row.clicked.connect(lambda d: self.device_clicked.emit(d))
             self.list_layout.insertWidget(self.list_layout.count() - 1, row)
             self._rows.append(row)
+            if stagger:                            # 刷新时逐行淡入，避免整列表硬闪
+                QTimer.singleShot(index * 28,
+                                  lambda w=row: motion.fade_in(w, base=170, start=0.0))
 
         if devices:
             self.scroll.show()
@@ -225,6 +229,7 @@ class Flyout(QWidget):
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self.config = config
+        motion.configure(config.get("ui"))
         self._drag_offset: QPoint | None = None
         self._closing = False
         self._was_active = False
@@ -274,6 +279,20 @@ class Flyout(QWidget):
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(700)
         self._watchdog.timeout.connect(self._watch_focus)
+        self.apply_appearance()
+
+    # ------------------------------------------------------------------ #
+    def apply_appearance(self):
+        """跟随「窗口材质 + 面板不透明度」重算面板底色。
+
+        弹出层本身不做 DWM 背景材质——它是无边框半透明窗口，系统材质会把
+        卡片外的 16px 阴影留白也涂成方块，反而毁掉圆角和投影；这里改为让
+        卡片本身更通透一点，视觉上与设置窗口的材质连成一套。
+
+        透明度是「百分比 × 材质基准 alpha」，所以 Mica 下 100% 仍有轻微的
+        壁纸色透出来，调到 50% 才是明显半透明——这样两档设置不会互相抵消。
+        """
+        self.surface.set_fill(theme.panel_fill(motion.material(), motion.panel_opacity()))
 
     # ------------------------------------------------------------------ #
     #: 面板外框留白（outer layout 的上下 margin）
@@ -293,7 +312,7 @@ class Flyout(QWidget):
     def _sync_content(self):
         """设备列表刷新了：高度立即跟上，面板正开着就贴着原下边缘伸缩，避免内容溢出。"""
         old = self.geometry()
-        if self._anim is not None and self._anim.state() == QAbstractAnimation.State.Running:
+        if motion.is_alive(self._anim) and self._anim.state() == QAbstractAnimation.State.Running:
             self._anim.stop()                      # 显示动画的高度是旧的，交给下面重新定位
         self._fit()
         if not self.isVisible() or self._closing:
@@ -403,27 +422,34 @@ class Flyout(QWidget):
         if self._closing:                          # 正在淡出：直接重新显示
             self._cancel_fade()
         target = self._preferred_rect()
+        animated = motion.transitions_enabled()
         start = QRect(target.x(), target.y() + (10 if target.top() < 400 else -10),
                       target.width(), target.height())
-        self.setGeometry(start)
-        self.setWindowOpacity(0.0)
+        self.setGeometry(start if animated else target)
+        self.setWindowOpacity(0.0 if animated else 1.0)
         self.show()
         self.raise_()
         self.activateWindow()
 
-        self._anim = QPropertyAnimation(self, b"geometry", self)
-        self._anim.setDuration(170)
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(target)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.start()
+        if animated:
+            # 进场用 Fluent 的减速曲线：先快后慢，落位时不回弹
+            if motion.is_alive(self._anim):
+                self._anim.stop()
+                self._anim.deleteLater()
+            self._anim = QPropertyAnimation(self, b"geometry", self)
+            self._anim.setDuration(motion.duration(200))
+            self._anim.setStartValue(start)
+            self._anim.setEndValue(target)
+            self._anim.setEasingCurve(motion.easing("decelerate"))
+            self._anim.start()
 
-        fade = QPropertyAnimation(self, b"windowOpacity", self)
-        fade.setDuration(150)
-        fade.setStartValue(0.0)
-        fade.setEndValue(1.0)
-        fade.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-        self._fade = fade
+            fade = QPropertyAnimation(self, b"windowOpacity", self)
+            fade.setDuration(motion.duration(170))
+            fade.setStartValue(0.0)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(motion.easing("decelerate"))
+            fade.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._fade = fade
 
         if callable(self.request_refresh):
             self.request_refresh()
@@ -434,7 +460,7 @@ class Flyout(QWidget):
 
     def _cancel_fade(self):
         for anim in (self._anim, self._fade):
-            if anim is not None and anim.state() == QAbstractAnimation.State.Running:
+            if motion.is_alive(anim) and anim.state() == QAbstractAnimation.State.Running:
                 anim.stop()
         self._closing = False
         self.setWindowOpacity(1.0)
@@ -442,11 +468,15 @@ class Flyout(QWidget):
     def hide_animated(self):
         if not self.isVisible():
             return
+        if not motion.transitions_enabled():
+            self._on_hidden()
+            return
         self._closing = True
         anim = QPropertyAnimation(self, b"windowOpacity", self)
-        anim.setDuration(110)
+        anim.setDuration(motion.duration(130))
         anim.setStartValue(self.windowOpacity())
         anim.setEndValue(0.0)
+        anim.setEasingCurve(motion.easing("accelerate"))
         anim.finished.connect(self._on_hidden)
         anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         self._fade = anim

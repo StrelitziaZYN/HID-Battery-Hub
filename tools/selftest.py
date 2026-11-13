@@ -109,19 +109,22 @@ def t_prompt():
     supported = next((d for d in allv if d["supported"]), None)
     unsupported = next((d for d in allv if not d["supported"]), None)
 
-    if supported:
-        text = prompt_builder.build(scanner.enrich(supported, cfg))
-        assert "## 1. 设备信息" in text and "## 6. 插件契约" in text
-        assert supported["name"] in text, "提示词里没有设备名"
-        assert supported["vendor"] in text, "提示词里没有厂商"
-        assert branding.BUNDLE_KIND in text, "提示词没有要求输出接入包"
-        assert "code_lines" in text, "提示词没有给出接入包结构"
-    if unsupported:
-        text = prompt_builder.build(unsupported)
-        assert "尚未接入协议" in text, "未接入设备没有提示逆向"
-        assert "HID 集合" in text
-    assert supported or unsupported, "没有设备可用于生成提示词"
-    return f"已生成 {len(text.splitlines())} 行提示词（含接入包格式）"
+    sample = supported or unsupported
+    assert sample, "没有设备可用于生成提示词"
+    text = prompt_builder.build(scanner.enrich(sample, cfg) if supported else sample)
+    assert "## 设备实测" in text and "## 接入包" in text
+    assert sample["name"] in text, "提示词里没有设备名"
+    assert sample["vendor"] in text, "提示词里没有厂商"
+    assert branding.BUNDLE_KIND in text, "提示词没有要求输出接入包"
+    assert "code_lines" in text, "提示词没有给出接入包结构"
+    assert "设备型号" not in text, "没填型号时不该出现型号行"
+
+    # 用户填写的型号必须进标题与设备信息，且提示词保持精简
+    typed = prompt_builder.build(sample, model="MCHOSE A7 V3 Pro")
+    assert "MCHOSE A7 V3 Pro" in typed.splitlines()[0], "型号没写进标题"
+    assert "- 设备型号：MCHOSE A7 V3 Pro（用户填写）" in typed, "型号没写进设备信息"
+    assert len(typed.splitlines()) < 80, "提示词应保持精简"
+    return f"提示词 {len(text.splitlines())} 行，带型号 {len(typed.splitlines())} 行"
 
 
 def t_icon_roundtrip():
@@ -553,6 +556,130 @@ def t_i18n():
     return f"{len(used)} 条 UI 文案，词典 {len(i18n_mod._EN)} 条，中英切换正常"
 
 
+def t_motion():
+    """动效档位 / 材质偏好 / 分段控件滑块 / 样式表 alpha：外观设置的底子必须可靠。"""
+    from app import backdrop, motion, theme
+    from app.widgets import Segmented
+
+    old = motion.state()
+    try:
+        motion.configure({"motion": "off", "material": "bogus"})
+        assert motion.duration(250) == 0, "「无动效」档仍给出非零时长"
+        assert not motion.transitions_enabled(), "「无动效」档不该再有窗口过渡"
+        assert motion.material() == motion.DEFAULTS["material"], "非法材质没回落默认值"
+
+        motion.configure({"motion": "subtle", "material": "acrylic"})
+        assert motion.duration(200) == 110, f"柔和档时长应为 110，实际 {motion.duration(200)}"
+        assert motion.material() == "acrylic"
+
+        motion.configure({"motion": "full"})
+        assert motion.duration(250) == 250, "标准档时长被改动"
+
+        # Qt 样式表只认 0..255 的 alpha：写成 0..1 会让整条背景规则失效（材质透不出来）
+        assert theme.rgba(QColor(1, 2, 3, 128)) == "rgba(1,2,3,128)"
+        mid = theme.mix(QColor(0, 0, 0, 0), QColor(100, 200, 40, 200), 0.5)
+        assert mid.getRgb()[:3] == (50, 100, 20), f"颜色插值不对：{mid.getRgb()}"
+
+        ui = default_config().get("ui") or {}
+        assert set(motion.DEFAULTS) <= set(ui), f"默认配置缺外观项：{ui}"
+        assert load_config().get("ui", {}).get("material") in motion.MATERIALS, "配置里的材质非法"
+
+        seg = Segmented([("a", "A"), ("b", "B"), ("c", "C")])
+        seg.resize(300, 32)
+        seg.show()
+        _pump(80)
+        first = seg._thumb.left()
+        seg.set_current("c")
+        _pump(420)
+        last = seg._thumb.left()
+        assert seg.current() == "c", "分段控件选中项没切换"
+        assert last > first + 40, f"选中底板没有滑过去：{first:.0f} → {last:.0f}"
+        seg.close()
+        detail = f"关闭=0ms / 柔和=110ms / 滑块 {first:.0f}→{last:.0f}px"
+    finally:
+        motion.configure(old)
+
+    supported, why = backdrop.describe()
+    return detail + "；材质" + ("可用" if supported else f"不可用（{why}）")
+
+
+def t_panel_opacity():
+    """面板不透明度：夹取、换算、预览与真实面板同源、滑块与输入框联动。"""
+    from app import motion, settings_page, theme
+    from app.ui import Flyout
+
+    old = motion.state()
+    real_save = settings_page.save_config
+    settings_page.save_config = lambda *a, **k: None   # 用例不该碰真实配置文件
+    try:
+        # 1) 范围夹取：越界/非数字都不能把界面搞坏
+        assert motion.clamp_opacity(5) == motion.OPACITY_MIN
+        assert motion.clamp_opacity(500) == motion.OPACITY_MAX
+        assert motion.clamp_opacity("abc") == motion.DEFAULTS["panel_opacity"]
+        assert motion.clamp_opacity(63.6) == 64, "小数应四舍五入到整数百分比"
+
+        # 2) 换算：100% 等于该材质的基准 alpha，往后按比例递减但不归零
+        for material in motion.MATERIALS:
+            base = theme.card_alpha(material)
+            assert theme.panel_fill(material, 100).alpha() == base, f"{material} 100% 应等于基准 alpha"
+            half = theme.panel_fill(material, 50).alpha()
+            assert abs(half - base / 2) <= 1, f"{material} 50% 应约 {base/2}，实际 {half}"
+            assert theme.panel_fill(material, 0).alpha() >= 1, "alpha 归零会让面板彻底消失"
+
+        # 3) 真实面板与设置页预览必须同源（同一个计算函数）
+        motion.configure({"material": "mica", "panel_opacity": 62})
+        fly = Flyout({"ui": motion.state()})
+        fly.apply_appearance()
+        want = theme.panel_fill("mica", 62).alpha()
+        assert fly.surface.fill().alpha() == want, "弹出面板底色没按不透明度计算"
+        fly.deleteLater()
+
+        # 4) 设置页联动：滑块 ↔ 输入框 ↔ 预览 ↔ 配置
+        cfg = {"ui": dict(motion.state()), "profiles": []}
+        page = settings_page.GeneralSettingsPage(cfg)
+        page.show()
+        _pump(60)
+
+        page.opacity_slider.setValue(40)
+        _pump(60)
+        assert page.opacity_value.text() == "40", f"输入框没跟滑块同步：{page.opacity_value.text()!r}"
+        assert page.preview.card.fill().alpha() == theme.panel_fill("mica", 40).alpha(), "预览没跟着滑块变"
+        assert motion.panel_opacity() == 40, "拖动后应立即生效（内存态）"
+        _pump(420)                                     # 防抖 320ms 后才落盘
+        assert cfg["ui"].get("panel_opacity") == 40, \
+            f"防抖落盘没生效：{cfg['ui'].get('panel_opacity')}"
+
+        page.opacity_value.setText("76")
+        page.opacity_value.editingFinished.emit()
+        _pump(60)
+        assert page.opacity_slider.value() == 76, "手输数值没同步回滑块"
+        assert motion.panel_opacity() == 76
+
+        page.opacity_value.setText("999")              # 程序化 setText 绕过 validator，靠夹取兜底
+        page.opacity_value.editingFinished.emit()
+        _pump(60)
+        assert page.opacity_slider.value() == motion.OPACITY_MAX, "越界输入没夹到上限"
+
+        page.opacity_value.setText("")
+        page.opacity_value.editingFinished.emit()
+        _pump(60)
+        assert page.opacity_value.text() == str(motion.OPACITY_MAX), "空输入应退回当前值"
+
+        page._opacity_save.stop()                      # 别让定时器在页面销毁后再写一次
+        page.close()
+        page.deleteLater()
+
+        ui = default_config().get("ui") or {}
+        assert "panel_opacity" in ui, "默认配置缺少 panel_opacity"
+        assert ui["panel_opacity"] == motion.OPACITY_MAX, "默认应为完全不透明的 100%"
+        detail = (f"{motion.OPACITY_MIN}–{motion.OPACITY_MAX}% / mica 100%→{theme.card_alpha('mica')}"
+                  f" 50%→{theme.panel_fill('mica', 50).alpha()} / 联动与夹取正常")
+    finally:
+        settings_page.save_config = real_save
+        motion.configure(old)
+    return detail
+
+
 def main() -> int:
     _ensure_app()
     for name, fn in (("协议插件注册", t_registry),
@@ -572,6 +699,8 @@ def main() -> int:
                      ("读取状态收尾", t_reading_state),
                      ("刷新编排与超时恢复", t_scan_orchestration),
                      ("接入包导入", t_bundle_import),
+                     ("外观与动效", t_motion),
+                     ("面板不透明度", t_panel_opacity),
                      ("双语词典完整性", t_i18n)):
         check(name, fn)
 

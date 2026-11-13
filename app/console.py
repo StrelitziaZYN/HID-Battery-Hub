@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QLabel,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from . import branding, i18n, theme
+from . import backdrop, branding, i18n, motion, theme
 from .history_page import HistoryPage
 from .icons import app_icon
 from .settings_page import GeneralSettingsPage, InterfaceSettingsPage
@@ -24,8 +24,40 @@ NAV = [
 ]  # 标签为中文键，渲染时经 i18n.T 翻译
 
 
+class TintSurface(QWidget):
+    """带底色的容器。
+
+    不用样式表设背景：Qt 里普通 `QWidget` 的 QSS `background` 需要
+    `WA_StyledBackground` 才绘制，漏了就完全不画（材质透出来后才发现）。
+    这里直接自绘，颜色含 alpha，正好用来压在系统材质之上做遮罩。
+    """
+
+    def __init__(self, fill: QColor, border_right: bool = False, parent=None):
+        super().__init__(parent)
+        self._fill = QColor(fill)
+        self._border_right = border_right
+
+    def set_fill(self, fill: QColor):
+        self._fill = QColor(fill)
+        self.update()
+
+    def fill(self) -> QColor:
+        return QColor(self._fill)
+
+    def paintEvent(self, event):                   # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), self._fill)
+        if self._border_right:
+            p.setPen(QPen(QColor(0, 0, 0, 18), 1))
+            p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+
+
 class NavItem(QAbstractButton):
-    """左侧导航项：图标 + 文字，选中时左侧一条强调色指示条。"""
+    """左侧导航项：图标 + 文字，选中时左侧一条强调色指示条。
+
+    悬停底色与选中态都是渐变：切换标签时选中块淡入、指示条从中间长出来，
+    比「上一项瞬间变灰、下一项瞬间变黑」更接近 Win11 设置页的观感。
+    """
 
     def __init__(self, label: str, glyph: str, parent=None):
         super().__init__(parent)
@@ -36,34 +68,52 @@ class NavItem(QAbstractButton):
         self.setFont(theme.ui_font(10))
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setFixedHeight(40)
+        self._hover = 0.0
+        self._sel = 0.0
+        self._hover_tween = motion.Tween(self, self._set_hover, base=120)
+        self._sel_tween = motion.Tween(self, self._set_sel, base=190)
 
-    def enterEvent(self, event):                   # noqa: N802
+    def _set_hover(self, value: float):
+        self._hover = value
         self.update()
-        super().enterEvent(event)
 
-    def leaveEvent(self, event):                   # noqa: N802
+    def _set_sel(self, value: float):
+        self._sel = value
         self.update()
-        super().leaveEvent(event)
+
+    def setChecked(self, checked: bool):           # noqa: N802
+        super().setChecked(checked)
+        self._sel_tween.to(1.0 if checked else 0.0)
 
     def sizeHint(self):                            # noqa: N802
         return QSize(184, 40)
+
+    def enterEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(0.0)
+        super().leaveEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(8, 2, -8, -2)
-        if self.isChecked():
+        hover_only = self._hover * (1.0 - self._sel)
+        alpha = 20.0 * self._sel + 10.0 * hover_only
+        if alpha > 0.4:
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(0, 0, 0, 20))
+            p.setBrush(QColor(0, 0, 0, round(alpha)))
             p.drawRoundedRect(r, 6, 6)
-            p.setBrush(theme.C.ACCENT)
-            p.drawRoundedRect(QRectF(2, r.top() + 9, 3, r.height() - 18), 1.5, 1.5)
-        elif self.underMouse():
+        if self._sel > 0.02:
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(0, 0, 0, 10))
-            p.drawRoundedRect(r, 6, 6)
+            p.setBrush(theme.tint(theme.C.ACCENT, round(255 * self._sel)))
+            h = (r.height() - 18) * self._sel
+            p.drawRoundedRect(QRectF(2, r.center().y() - h / 2, 3, h), 1.5, 1.5)
 
-        color = theme.C.TEXT if self.isChecked() else theme.C.TEXT_SECONDARY
+        color = theme.mix(theme.C.TEXT_SECONDARY, theme.C.TEXT,
+                          max(self._sel, self._hover * 0.55))
         p.setPen(QPen(color))
         p.setFont(theme.icon_font(11))
         p.drawText(QRectF(r.left() + 12, r.top(), 22, r.height()),
@@ -80,6 +130,7 @@ class ConsoleWindow(QWidget):
     icons_changed = Signal()
     refresh_requested = Signal()
     language_changed = Signal()
+    appearance_changed = Signal()
     opened = Signal()
 
     def __init__(self, config: Dict[str, Any],
@@ -89,23 +140,35 @@ class ConsoleWindow(QWidget):
         self.config = config
         self._devices_provider = devices_provider
         self._current = "general"
+        self._seen: set[str] = set()               # 已经展示过的页：首次不做淡入，避免闪
+        self._material = "solid"
 
+        motion.configure(config.get("ui"))
         self.setWindowTitle(branding.APP_NAME)
         self.setWindowIcon(QIcon(app_icon(False)))
         self.resize(940, 820)                      # 3:2 图表需要更充裕的纵向空间
         self.setMinimumSize(800, 560)
         self.setAcceptDrops(True)
-        self.setStyleSheet(f"QWidget#consoleRoot{{background:{theme.C.WINDOW.name()};}}")
+        # 半透明窗口 + 系统材质：底色由 apply_appearance() 按材质给透明度
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # 整窗内容装在一个 shell 里：打开设置窗口时对 shell 做淡入，
+        # 不去动 windowOpacity（那会把窗口变成分层窗口，把系统材质顶掉）。
+        self.shell = QWidget()
+        self.shell.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        root.addWidget(self.shell)
+        shell = QHBoxLayout(self.shell)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+
         # ---------------- 左侧导航 ---------------- #
-        nav = QWidget()
-        nav.setFixedWidth(208)
-        nav.setStyleSheet("background: #F3F3F3; border-right: 1px solid rgba(0,0,0,18);")
-        nav_lay = QVBoxLayout(nav)
+        self.nav = TintSurface(theme.nav_scrim("solid"), border_right=True)
+        self.nav.setFixedWidth(208)
+        nav_lay = QVBoxLayout(self.nav)
         nav_lay.setContentsMargins(12, 18, 12, 16)
         nav_lay.setSpacing(2)
 
@@ -138,11 +201,11 @@ class ConsoleWindow(QWidget):
                                       glyph=theme.ICON["refresh"], spin=True)
         self.btn_refresh.clicked.connect(lambda *_: self.refresh_requested.emit())
         nav_lay.addWidget(self.btn_refresh)
-        root.addWidget(nav)
+        shell.addWidget(self.nav)
 
         # ---------------- 右侧内容 ---------------- #
-        content = QWidget()
-        content.setObjectName("consoleRoot")
+        content = TintSurface(theme.scrim("solid"))
+        self.content = content
         content_lay = QVBoxLayout(content)
         content_lay.setContentsMargins(26, 20, 26, 20)
         content_lay.setSpacing(0)
@@ -163,12 +226,25 @@ class ConsoleWindow(QWidget):
         self.iface_page.icons_changed.connect(self.icons_changed)
         self.iface_page.prompt_requested.connect(self.open_prompt)
         self.general_page.language_changed.connect(self.language_changed)
+        self.general_page.appearance_changed.connect(self.apply_appearance)
 
-        root.addWidget(content, 1)
+        shell.addWidget(content, 1)
         self._pages = {"general": self.general_page,
                        "stats": self.history_page,
                        "iface": self.iface_page}
+        self.apply_appearance()
         self.open_page("general", refresh=False)
+
+    # ------------------------------------------------------------------ #
+    def apply_appearance(self):
+        """材质 / 动效改了：重新贴 DWM 材质并同步底色，不需要重启。"""
+        motion.configure(self.config.get("ui"))
+        material = backdrop.apply(self, motion.material())
+        self._material = material
+        self.nav.set_fill(theme.nav_scrim(material))
+        self.content.set_fill(theme.scrim(material))
+        self.update()
+        self.appearance_changed.emit()
 
     def _on_config_changed(self):
         """任一页改了配置：三页都重读一次（间隔 / 自启 / 插件列表可能互相影响）。"""
@@ -199,7 +275,12 @@ class ConsoleWindow(QWidget):
         self._current = key
         for name, item in self._nav.items():
             item.setChecked(name == key)
+        switching = page is not self.stack.currentWidget()
         self.stack.setCurrentWidget(page)
+        if switching and key in self._seen and motion.transitions_enabled() and self.isVisible():
+            # 只在「再次切回」时淡入：首次展示必须立刻完整可见（截图/录屏都靠这个）
+            motion.fade_in(page, base=190, start=0.35)
+        self._seen.add(key)
         if refresh:
             self._reload_current()
 
@@ -232,6 +313,11 @@ class ConsoleWindow(QWidget):
     # ------------------------------------------------------------------ #
     def showEvent(self, event):                    # noqa: N802
         super().showEvent(event)
+        self.apply_appearance()                    # 窗口句柄可能重建，材质要重贴
+        if not getattr(self, "_faded_in", False):
+            self._faded_in = True
+            if motion.transitions_enabled():
+                motion.fade_in(self.shell, base=200, start=0.0)
         self.general_page.reload(self.config)
         self.history_page.reload()
         self.iface_page.reload(self.config)

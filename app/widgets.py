@@ -1,13 +1,18 @@
-"""Fluent 风格基础控件。"""
+"""Fluent 风格基础控件。
+
+动效约定：悬停/按压都是 0..1 的进度补间（`motion.Tween`），自绘时用
+`theme.mix()` 在两色间插值；动效关掉时 `Tween.to()` 直接落到终值，
+所以布局和可读性永远不会依赖动画跑完。
+"""
 from __future__ import annotations
 
-from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, Property, QPropertyAnimation,
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, Property, QPointF, QPropertyAnimation,
                             QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QAbstractButton, QHBoxLayout, QLabel, QSlider,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from . import i18n, theme
+from . import i18n, motion, theme
 
 
 class Surface(QWidget):
@@ -17,9 +22,17 @@ class Surface(QWidget):
                  border: QColor | None = None):
         super().__init__(parent)
         self._radius = radius
-        self._fill = fill or theme.C.WINDOW
+        self._fill = QColor(fill or theme.C.WINDOW)
         self._border = border or theme.C.STROKE
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def set_fill(self, color: QColor):
+        """换底色（窗口材质切换时用：越透，系统的 Mica / Acrylic 越明显）。"""
+        self._fill = QColor(color)
+        self.update()
+
+    def fill(self) -> QColor:
+        return QColor(self._fill)
 
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
@@ -119,9 +132,14 @@ class ListRow(QWidget):
     def __init__(self, parent=None, radius: int = 8):
         super().__init__(parent)
         self._radius = radius
-        self._hover = False
+        self._hover = 0.0
         self._dimmed = False
+        self._hover_tween = motion.Tween(self, self._set_hover, base=120)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def _set_hover(self, value: float):
+        self._hover = value
+        self.update()
 
     def set_dimmed(self, dimmed: bool):
         """停用的接口整行压暗，和启用中的行一眼能分开。"""
@@ -129,13 +147,11 @@ class ListRow(QWidget):
         self.update()
 
     def enterEvent(self, event):                   # noqa: N802
-        self._hover = True
-        self.update()
+        self._hover_tween.to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):                   # noqa: N802
-        self._hover = False
-        self.update()
+        self._hover_tween.to(0.0)
         super().leaveEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
@@ -144,10 +160,10 @@ class ListRow(QWidget):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         if self._dimmed:
             fill, stroke = QColor(0, 0, 0, 4), QColor(0, 0, 0, 14)
-        elif self._hover:
-            fill, stroke = QColor(246, 246, 246, 255), QColor(0, 0, 0, 58)
         else:
-            fill, stroke = QColor(255, 255, 255, 255), QColor(0, 0, 0, 28)
+            fill = theme.mix(QColor(255, 255, 255, 255), QColor(246, 246, 246, 255),
+                             self._hover)
+            stroke = theme.mix(QColor(0, 0, 0, 28), QColor(0, 0, 0, 58), self._hover)
         p.setPen(QPen(stroke, 1))
         p.setBrush(fill)
         p.drawRoundedRect(r, self._radius, self._radius)
@@ -190,10 +206,13 @@ class Banner(QWidget):
 
     # ------------------------------------------------------------------ #
     def set_message(self, text: str, tone: str = "info"):
+        was_hidden = not self.isVisible()
         self._tone = tone
         self.label.setText(text)
         self._apply_tone()
         self.show()
+        if was_hidden:                             # 从无到有：淡入，别硬闪一下
+            motion.fade_in(self, base=170, start=0.0)
 
     def text(self) -> str:
         return self.label.text()
@@ -219,18 +238,21 @@ class HoverFrame(QWidget):
     def __init__(self, parent=None, radius: int = 8):
         super().__init__(parent)
         self._radius = radius
-        self._hover = False
+        self._hover = 0.0
+        self._hover_tween = motion.Tween(self, self._set_hover, base=120)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def enterEvent(self, event):                   # noqa: N802
-        self._hover = True
+    def _set_hover(self, value: float):
+        self._hover = value
         self.update()
+
+    def enterEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):                   # noqa: N802
-        self._hover = False
-        self.update()
+        self._hover_tween.to(0.0)
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):            # noqa: N802
@@ -239,11 +261,11 @@ class HoverFrame(QWidget):
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
-        if self._hover:
+        if self._hover > 0.004:
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.C.SURFACE_HOVER)
+            p.setBrush(theme.mix(QColor(0, 0, 0, 0), theme.C.SURFACE_HOVER, self._hover))
             p.drawRoundedRect(QRectF(self.rect()), self._radius, self._radius)
 
 
@@ -382,35 +404,48 @@ class IconButton(_SpinGlyph, QAbstractButton):
         self._glyph = glyph
         self._icon_size = icon_size
         self._color = color or theme.C.TEXT_SECONDARY
-        self._hover = False
+        self._hover = 0.0
+        self._press = 0.0
+        self._hover_tween = motion.Tween(self, self._set_hover, base=120)
+        self._press_tween = motion.Tween(self, self._set_press, base=90)
         self.setFixedSize(size, size)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(tooltip)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.pressed.connect(lambda: self._press_tween.to(1.0))
+        self.released.connect(lambda: self._press_tween.to(0.0))
         if spin:
             self._init_spin()
+
+    def _set_hover(self, value: float):
+        self._hover = value
+        self.update()
+
+    def _set_press(self, value: float):
+        self._press = value
+        self.update()
 
     def sizeHint(self):                            # noqa: N802
         return QSize(self.width(), self.height())
 
     def enterEvent(self, event):                   # noqa: N802
-        self._hover = True
-        self.update()
+        self._hover_tween.to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):                   # noqa: N802
-        self._hover = False
-        self.update()
+        self._hover_tween.to(0.0)
         super().leaveEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if self._hover or self.isDown():
+        active = max(self._hover, self._press)
+        if active > 0.004:
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(0, 0, 0, 26) if self.isDown() else theme.C.SURFACE_HOVER)
+            bg = theme.mix(QColor(0, 0, 0, 0), theme.C.SURFACE_HOVER, self._hover)
+            p.setBrush(theme.mix(bg, QColor(0, 0, 0, 26), self._press))
             p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 6, 6)
-        color = theme.C.TEXT if (self._hover or self.isDown()) else self._color
+        color = theme.mix(self._color, theme.C.TEXT, active)
         if not self.isEnabled():
             color = theme.tint(color, 90)
         if hasattr(self, "_spin") and self._angle:
@@ -440,10 +475,21 @@ class BatteryBar(QWidget):
         self.setFixedSize(width, height)
         self._percent: int | None = None
         self._charging = False
+        self._ratio = 0.0
+        self._ratio_tween = motion.Tween(self, self._set_ratio, base=280)
+
+    def _set_ratio(self, value: float):
+        self._ratio = value
+        self.update()
 
     def set_state(self, percent: int | None, charging: bool = False):
         self._percent = percent
         self._charging = charging
+        target = 0.0 if percent is None else max(0.0, min(1.0, percent / 100.0))
+        if self._ratio_tween.value() == 0.0 and self._ratio == 0.0:
+            self._ratio_tween.set(target)          # 首次出现不做过场，直接显示真实值
+        else:
+            self._ratio_tween.to(target)
         self.update()
 
     def paintEvent(self, event):                   # noqa: N802
@@ -453,10 +499,10 @@ class BatteryBar(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(theme.C.TRACK)
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        if self._percent is not None and self._percent > 0:
-            ratio = max(0.04, min(1.0, self._percent / 100.0))
+        if self._ratio > 0.004:
+            ratio = max(0.04, self._ratio)
             color = theme.C.ACCENT if self._charging else theme.C.TEXT
-            if self._percent <= 15 and not self._charging:
+            if self._percent is not None and self._percent <= 15 and not self._charging:
                 color = theme.C.DANGER
             fill = QRectF(r.left(), r.top(), r.width() * ratio, r.height())
             p.setBrush(color)
@@ -477,7 +523,8 @@ class DeviceRow(QWidget):
         # 不要给设备行（及其子控件）设 tooltip：Qt 会把子控件的 ToolTip 事件冒泡到父控件，
         # 鼠标停在名称/电量这些 QLabel 上也会弹出一整块系统样式的黑框，面板里不需要。
         self.setToolTip("")
-        self._hover = False
+        self._hover = 0.0
+        self._hover_tween = motion.Tween(self, self._set_hover, base=110)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 6, 10, 6)
@@ -553,22 +600,24 @@ class DeviceRow(QWidget):
             self.clicked.emit(self.device)
         super().mouseReleaseEvent(event)
 
-    def enterEvent(self, event):                   # noqa: N802
-        self._hover = True
+    def _set_hover(self, value: float):
+        self._hover = value
         self.update()
+
+    def enterEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):                   # noqa: N802
-        self._hover = False
-        self.update()
+        self._hover_tween.to(0.0)
         super().leaveEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
-        if self._hover:
+        if self._hover > 0.004:
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.C.SURFACE_HOVER)
+            p.setBrush(theme.mix(QColor(0, 0, 0, 0), theme.C.SURFACE_HOVER, self._hover))
             p.drawRoundedRect(QRectF(self.rect()), 8, 8)
 
 
@@ -581,13 +630,28 @@ class ToggleSwitch(QAbstractButton):
         self.setFixedSize(40, 22)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self._pos = 1.0 if checked else 0.0
+        self._hover = 0.0
+        self._press = 0.0
         self._anim = QPropertyAnimation(self, b"handle", self)
-        self._anim.setDuration(140)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setDuration(motion.duration(180))
+        self._anim.setEasingCurve(motion.easing("decelerate"))
+        self._hover_tween = motion.Tween(self, self._set_hover, base=120)
+        self._press_tween = motion.Tween(self, self._set_press, base=90)
+        self.pressed.connect(lambda: self._press_tween.to(1.0))
+        self.released.connect(lambda: self._press_tween.to(0.0))
         self.toggled.connect(self._on_toggle)
+
+    def _set_hover(self, value: float):
+        self._hover = value
+        self.update()
+
+    def _set_press(self, value: float):
+        self._press = value
+        self.update()
 
     def _on_toggle(self, checked: bool):
         self._anim.stop()
+        self._anim.setDuration(motion.duration(180))
         self._anim.setStartValue(self._pos)
         self._anim.setEndValue(1.0 if checked else 0.0)
         self._anim.start()
@@ -602,27 +666,31 @@ class ToggleSwitch(QAbstractButton):
     handle = Property(float, _get_handle, _set_handle)
 
     def enterEvent(self, event):                   # noqa: N802
-        self.update()
+        self._hover_tween.to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):                   # noqa: N802
-        self.update()
+        self._hover_tween.to(0.0)
         super().leaveEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(1, 2, -1, -2)
-        stroke = theme.C.ACCENT if self.isChecked() else (
-            QColor(0, 0, 0, 85) if self.underMouse() else QColor(0, 0, 0, 55))
+        # 关闭→打开时轨道颜色跟着滑块一起渐变，不是「啪」一下变蓝
+        fill = theme.mix(QColor(0, 0, 0, 12), theme.C.ACCENT, self._pos)
+        stroke_off = theme.mix(QColor(0, 0, 0, 55), QColor(0, 0, 0, 85), self._hover)
+        stroke = theme.mix(stroke_off, theme.C.ACCENT, self._pos)
         p.setPen(QPen(stroke, 1))
-        p.setBrush(theme.C.ACCENT if self.isChecked() else QColor(0, 0, 0, 12))
+        p.setBrush(fill)
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        # 按压时滑块轻微拉长（WinUI 开关的经典反馈），松手弹回
         d = r.height() - 4
-        x = r.left() + 2 + (r.width() - d - 4) * self._pos
+        w = d + 4.0 * self._press
+        x = r.left() + 2 + (r.width() - d - 4) * self._pos - 2.0 * self._press * self._pos
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255) if self.isChecked() else QColor(90, 90, 90))
-        p.drawEllipse(QRectF(x, r.top() + 2, d, d))
+        p.setBrush(theme.mix(QColor(90, 90, 90), QColor(255, 255, 255), self._pos))
+        p.drawEllipse(QRectF(x, r.top() + 2, w, d))
 
 
 class FlatButton(_SpinGlyph, QAbstractButton):
@@ -634,13 +702,26 @@ class FlatButton(_SpinGlyph, QAbstractButton):
         self.setText(text)
         self._primary = primary
         self._glyph = glyph
-        self._hover = False
+        self._hover = 0.0
+        self._press = 0.0
+        self._hover_tween = motion.Tween(self, self._set_hover, base=130)
+        self._press_tween = motion.Tween(self, self._set_press, base=90)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setMinimumHeight(32)
         self.setFont(theme.ui_font(9))
+        self.pressed.connect(lambda: self._press_tween.to(1.0))
+        self.released.connect(lambda: self._press_tween.to(0.0))
         if spin and glyph:
             self._init_spin()
+
+    def _set_hover(self, value: float):
+        self._hover = value
+        self.update()
+
+    def _set_press(self, value: float):
+        self._press = value
+        self.update()
 
     def sizeHint(self):                            # noqa: N802
         width = self.fontMetrics().horizontalAdvance(self.text()) + 26
@@ -649,37 +730,29 @@ class FlatButton(_SpinGlyph, QAbstractButton):
         return QSize(max(78, width), 32)
 
     def enterEvent(self, event):                   # noqa: N802
-        self._hover = True
-        self.update()
+        self._hover_tween.to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):                   # noqa: N802
-        self._hover = False
-        self.update()
+        self._hover_tween.to(0.0)
         super().leaveEvent(event)
 
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        down = self.isDown()
         enabled = self.isEnabled()
+        active = max(self._hover, self._press)
         if self._primary:
-            bg = QColor(theme.C.TEXT)
-            if down:
-                bg = QColor(0, 0, 0)
-            elif self._hover:
-                bg = QColor(48, 48, 48)
+            bg = theme.mix(QColor(theme.C.TEXT), QColor(48, 48, 48), self._hover)
+            bg = theme.mix(bg, QColor(0, 0, 0), self._press)
             fg = QColor(255, 255, 255)
             border = QColor(0, 0, 0, 0)
         else:
-            bg = QColor(0, 0, 0, 0)
-            if down:
-                bg = QColor(0, 0, 0, 18)
-            elif self._hover:
-                bg = QColor(255, 255, 255, 255)
-            fg = theme.C.TEXT if (self._hover or down) else theme.C.TEXT_SECONDARY
-            border = QColor(0, 0, 0, 46) if down else theme.C.STROKE
+            bg = theme.mix(QColor(0, 0, 0, 0), QColor(255, 255, 255, 255), self._hover)
+            bg = theme.mix(bg, QColor(0, 0, 0, 18), self._press)
+            fg = theme.mix(theme.C.TEXT_SECONDARY, theme.C.TEXT, active)
+            border = theme.mix(theme.C.STROKE, QColor(0, 0, 0, 46), self._press)
         if not enabled:                            # 禁用：整体压淡，不再响应悬停
             fg = theme.tint(fg, 90)
             bg = theme.tint(bg, 120) if bg.alpha() else bg
@@ -762,12 +835,39 @@ class DragArea(QWidget):
 
 
 class _SegButton(QAbstractButton):
+    """分段控件里的一段：只画文字，选中底板由 Segmented 统一滑动绘制。"""
+
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
         self.setText(text)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFont(theme.ui_font(8))
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._on = 0.0
+        self._hover = 0.0
+        self._on_tween = motion.Tween(self, self._set_on, base=180)
+        self._hover_tween = motion.Tween(self, self._set_hover, base=120)
+
+    def _set_on(self, value: float):
+        self._on = value
+        self.update()
+
+    def _set_hover(self, value: float):
+        self._hover = value
+        self.update()
+
+    def setChecked(self, checked: bool):           # noqa: N802
+        super().setChecked(checked)
+        self._on_tween.to(1.0 if checked else 0.0)
+
+    def enterEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(0.0)
+        super().leaveEvent(event)
 
     def sizeHint(self):                            # noqa: N802
         return QSize(self.fontMetrics().horizontalAdvance(self.text()) + 26, 26)
@@ -775,21 +875,17 @@ class _SegButton(QAbstractButton):
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        if self.isChecked():
-            p.setPen(QPen(QColor(0, 0, 0, 18), 1))
-            p.setBrush(QColor(255, 255, 255, 250))
-        else:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-        if self.isChecked():
-            p.drawRoundedRect(r, 6, 6)
-        p.setPen(QPen(theme.C.TEXT if self.isChecked() else theme.C.TEXT_SECONDARY))
+        level = max(self._on, self._hover * 0.6)
+        p.setPen(QPen(theme.mix(theme.C.TEXT_SECONDARY, theme.C.TEXT, level)))
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
 
 
 class Segmented(QWidget):
-    """分段控件：互斥的多选一（24 小时 / 7 天 / 30 天）。"""
+    """分段控件：互斥的多选一（24 小时 / 7 天 / 30 天）。
+
+    选中底板是一块独立的白色圆角块，切换时用 200ms 滑动过去（Fluent 的
+    "connected animation" 感觉），而不是让两块原地闪现。
+    """
 
     changed = Signal(str)
 
@@ -797,6 +893,11 @@ class Segmented(QWidget):
         super().__init__(parent)
         self._buttons: dict[str, _SegButton] = {}
         self._current = ""
+        self._thumb = QRectF()
+        # 复用同一个动画：连点时分段控件不会堆出一串短命动画对象
+        self._thumb_anim = QVariantAnimation(self)
+        self._thumb_anim.valueChanged.connect(self._set_thumb)
+        self._thumb_anim.finished.connect(self._settle_thumb)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(3, 3, 3, 3)
@@ -810,12 +911,17 @@ class Segmented(QWidget):
         if items:
             self._select(items[0][0], emit=False)
 
+    # ------------------------------------------------------------------ #
     def paintEvent(self, event):                   # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(0, 0, 0, 18))
         p.drawRoundedRect(QRectF(self.rect()), 8, 8)
+        if self._thumb.isValid():
+            p.setPen(QPen(QColor(0, 0, 0, 18), 1))
+            p.setBrush(QColor(255, 255, 255, 250))
+            p.drawRoundedRect(self._thumb, 6, 6)
 
     def current(self) -> str:
         return self._current
@@ -823,13 +929,164 @@ class Segmented(QWidget):
     def set_current(self, key: str, emit: bool = False) -> None:
         self._select(key, emit=emit)
 
+    def resizeEvent(self, event):                  # noqa: N802
+        super().resizeEvent(event)
+        if self._current in self._buttons:
+            self._thumb = self._thumb_rect(self._current)
+            self.update()
+
+    def _thumb_rect(self, key: str) -> QRectF:
+        btn = self._buttons.get(key)
+        if btn is None:
+            return QRectF()
+        return QRectF(btn.geometry()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+    def _set_thumb(self, rect):
+        self._thumb = QRectF(rect)
+        self.update()
+
+    def _settle_thumb(self):
+        if self._current in self._buttons:
+            self._thumb = self._thumb_rect(self._current)
+            self.update()
+
     def _select(self, key: str, emit: bool = True) -> None:
         if key not in self._buttons:
             return
         for k, btn in self._buttons.items():
             btn.setChecked(k == key)
-        if key == self._current:
-            return
+        changed = key != self._current
         self._current = key
-        if emit:
+        target = self._thumb_rect(key)
+        ms = motion.duration(220)
+        if not self._thumb.isValid() or not self.isVisible() or ms <= 0:
+            self._thumb_anim.stop()
+            self._set_thumb(target)                # 首次布局/动效关闭：直接定位
+        else:
+            self._thumb_anim.stop()
+            self._thumb_anim.setStartValue(self._thumb)
+            self._thumb_anim.setEndValue(target)
+            self._thumb_anim.setDuration(ms)
+            self._thumb_anim.setEasingCurve(motion.easing("decelerate"))
+            self._thumb_anim.start()
+        if changed and emit:
             self.changed.emit(key)
+
+
+class FluentSlider(QSlider):
+    """Fluent 风格滑块：自绘轨道与圆钮，点轨道即跳到该位置。
+
+    交互自己接管（原生 QSlider 点击轨道只按 pageStep 跳，手感不对），
+    但取值、键盘、禁用逻辑仍然复用 QSlider，不另造一套状态机。
+    悬停/按下是 0..1 的补间，动效关掉时直接落终值。
+    """
+
+    def __init__(self, parent=None, minimum: int = 0, maximum: int = 100, value: int = 0):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setRange(int(minimum), int(maximum))
+        self.setSingleStep(1)
+        self.setPageStep(max(1, (maximum - minimum) // 10))
+        self.setValue(int(value))
+        self.setFixedHeight(26)
+        self.setMinimumWidth(120)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._hover = 0.0
+        self._hover_tween = motion.Tween(self, self._set_hover, base=110)
+        self._pressed = False
+        self.valueChanged.connect(lambda *_: self.update())
+        self.rangeChanged.connect(lambda *_: self.update())
+
+    # ------------------------------------------------------------------ #
+    def _set_hover(self, value: float):
+        self._hover = float(value)
+        self.update()
+
+    def _handle_diameter(self) -> float:
+        return 14.0 + 2.0 * self._hover - (2.0 if self._pressed else 0.0)
+
+    def _value_at(self, x: float) -> int:
+        """把鼠标的 x 换算成取值：两头各留半个钮的宽度，滑到头才是极限值。"""
+        span = max(1.0, self.width() - 14.0)
+        ratio = max(0.0, min(1.0, (x - 7.0) / span))
+        low, high = self.minimum(), self.maximum()
+        return int(round(low + ratio * (high - low)))
+
+    # ------------------------------------------------------------------ #
+    def enterEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):                   # noqa: N802
+        self._hover_tween.to(0.0)
+        super().leaveEvent(event)
+
+    def focusInEvent(self, event):                 # noqa: N802
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event):                # noqa: N802
+        super().focusOutEvent(event)
+        self.update()
+
+    def mousePressEvent(self, event):              # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self._pressed = True
+            self.setValue(self._value_at(event.position().x()))
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):               # noqa: N802
+        if self._pressed and self.isEnabled():
+            self.setValue(self._value_at(event.position().x()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):            # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._pressed:
+            self._pressed = False
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------------------------ #
+    def paintEvent(self, event):                   # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        enabled = self.isEnabled()
+        t = (self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
+        d = self._handle_diameter()
+        cy = self.height() / 2.0
+        left = d / 2.0
+        track = QRectF(left, cy - 2.0, max(1.0, self.width() - d), 4.0)
+        cx = track.left() + track.width() * t
+
+        accent = theme.C.ACCENT if enabled else QColor(120, 120, 120, 130)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 36))
+        p.drawRoundedRect(track, 2, 2)
+
+        filled = QRectF(track.left(), track.top(), max(0.0, cx - track.left()), track.height())
+        if filled.width() > 0.5:
+            p.setBrush(accent)
+            p.drawRoundedRect(filled, 2, 2)
+
+        handle = QRectF(cx - d / 2.0, cy - d / 2.0, d, d)
+        p.setBrush(QColor(255, 255, 255) if enabled else QColor(246, 246, 246))
+        p.setPen(QPen(accent, 1.6))
+        p.drawEllipse(handle)
+        if enabled:                                # 钮心一个小点，和 WinUI 一致
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(accent)
+            p.drawEllipse(QPointF(cx, cy), 2.2 + 0.6 * self._hover, 2.2 + 0.6 * self._hover)
+
+        if self.hasFocus():
+            ring = QColor(accent)
+            ring.setAlpha(90)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(ring, 2))
+            p.drawEllipse(handle.adjusted(-2.5, -2.5, 2.5, 2.5))

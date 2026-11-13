@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QGraphicsDropShadowEffect,
-                               QHBoxLayout, QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout,
+                               QWidget)
 
 from . import i18n, plugin_store, prompt_builder, scanner, theme
 from .widgets import ElidedLabel, FlatButton, IconButton, Surface
@@ -88,6 +89,24 @@ class PromptDialog(QDialog):
         pick.addWidget(self.btn_detect)
         lay.addLayout(pick)
 
+        # 设备型号：名称是通用名（USB Receiver / 2.4G Dongle）时由用户补全，直接写进提示词
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 2, 0, 0)
+        model_row.setSpacing(6)
+        label = QLabel(i18n.T("设备型号"))
+        label.setFont(theme.ui_font(8))
+        label.setStyleSheet(f"color: {theme.C.TEXT_SECONDARY.name()};")
+        model_row.addWidget(label)
+        self.model_edit = QLineEdit()
+        self.model_edit.setFont(theme.ui_font(9))
+        self.model_edit.setStyleSheet(theme.INPUT_QSS)
+        self.model_edit.setPlaceholderText(
+            i18n.T("名称看不出型号时填这里，例如 MCHOSE A7 V3 Pro；留空则由 AI 自行判断"))
+        self.model_edit.setClearButtonEnabled(True)
+        self.model_edit.textChanged.connect(lambda *_: self._rebuild())
+        model_row.addWidget(self.model_edit, 1)
+        lay.addLayout(model_row)
+
         self.summary = ElidedLabel("")
         self.summary.setFont(theme.ui_font(8))
         self.summary.setStyleSheet(f"color: {theme.C.TEXT_TERTIARY.name()}; padding: 2px 0 0 2px;")
@@ -158,11 +177,11 @@ class PromptDialog(QDialog):
         if initial:
             target = self._find(initial)
             if target is not None:
-                # 用主面板已有的读数补齐（避免重复查询）
+                # 只借用主面板已有的读数（避免重复查询），不据此假定「已支持」——
+                # 是否已接入由本机接口配置决定，不是由面板数据决定
                 target.update({k: initial[k] for k in
                                ("percent", "charging", "connection", "real_pid", "model")
                                if initial.get(k) is not None})
-                target["supported"] = True
         elif preselect_uid:
             target = self._find({"uid": preselect_uid})
 
@@ -215,12 +234,24 @@ class PromptDialog(QDialog):
         bits = [d.get("name"), d.get("vendor"), prompt_builder.conn_text(d)]
         self.summary.setText(" · ".join(b for b in bits if b))
 
-        prompt = prompt_builder.build(d)
+        # 已知型号（从回包里学到的）预填，用户可随时改；改完立刻重算提示词
+        self.model_edit.blockSignals(True)
+        self.model_edit.setText(str(d.get("model") or ""))
+        self.model_edit.blockSignals(False)
+        self._rebuild()
+
+    def _rebuild(self):
+        """型号变了就重算提示词（纯字符串拼接，不碰设备）。"""
+        d = self._device
+        if not d:
+            return
+        model = self.model_edit.text().strip()
+        prompt = prompt_builder.build(d, model=model)
         self.text.setPlainText(prompt)
         self.text.moveCursor(QTextCursor.MoveOperation.Start)
         self.counter.setText(i18n.TF("{} 行 · {} 字", len(prompt.splitlines()), len(prompt)))
-        self.hint.setText(i18n.T("提示词已生成") if d.get("supported")
-                          else i18n.T("该设备尚未接入，提示词将要求 AI 逆向协议"))
+        self.hint.setText(i18n.TF("提示词已按型号「{}」生成", model) if model
+                          else i18n.T("提示词已生成"))
 
     def _copy(self):
         text = self.text.toPlainText()
