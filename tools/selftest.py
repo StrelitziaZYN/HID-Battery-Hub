@@ -717,6 +717,54 @@ def t_panel_opacity():
     return detail
 
 
+def t_nav_state():
+    """导航选中态：首次从悬浮窗进「电量统计」时不能双高亮（v1.5 补间回归）。"""
+    from app import motion
+    from app.console import ConsoleWindow
+
+    old = motion.state()
+    console = None
+    try:
+        motion.configure({"motion": "full"})
+
+        # 1) 补间反例：旧动画刚起跑就被叫停回原位（一帧都还没落地）
+        tw = motion.Tween(None, lambda v: None)
+        tw.to(1.0, base=190)
+        tw.to(0.0, base=190)
+        _pump(300)
+        assert abs(tw.value()) < 0.01, f"停掉的反向动画仍把值带到 {tw.value():.3f}"
+
+        # 2) 中途反向：从当前值继续，不能被「旧终点」拽着跳变
+        tw2 = motion.Tween(None, lambda v: None)
+        tw2.to(1.0, base=400)
+        _pump(150)
+        mid = tw2.value()
+        assert 0.05 < mid < 0.95, f"中途值异常：{mid:.3f}"
+        tw2.to(0.0, base=400)
+        snap = tw2.value()
+        _pump(700)
+        assert abs(tw2.value()) < 0.01, f"反向补间没落到 0：{tw2.value():.3f}"
+        assert abs(snap - mid) < 0.2, f"反向瞬间跳变：{mid:.3f} → {snap:.3f}（旧终点污染）"
+
+        # 3) 真实路径：首次创建窗口后同一调用栈切到「电量统计」（悬浮窗按钮）
+        console = ConsoleWindow(load_config(), lambda: [])
+        console.open_page("stats")
+        console.show()
+        _pump(500)
+        lit = [k for k, it in console._nav.items() if it._sel_tween.value() > 0.01]
+        mismatch = [k for k, it in console._nav.items()
+                    if it.isChecked() != (it._sel_tween.value() > 0.5)]
+        assert lit == ["stats"], f"高亮的导航项应只有 stats，实际 {lit}"
+        assert not mismatch, f"选中态与高亮不一致：{mismatch}"
+        detail = f"首次进 stats 单高亮；反向不跳变（{mid:.2f}→{snap:.2f}）"
+    finally:
+        if console is not None:
+            console.close()
+            console.deleteLater()
+        motion.configure(old)
+    return detail
+
+
 def main() -> int:
     _ensure_app()
     for name, fn in (("协议插件注册", t_registry),
@@ -738,6 +786,7 @@ def main() -> int:
                      ("接入包导入", t_bundle_import),
                      ("外观与动效", t_motion),
                      ("面板不透明度", t_panel_opacity),
+                     ("导航选中态一致", t_nav_state),
                      ("双语词典完整性", t_i18n)):
         check(name, fn)
 

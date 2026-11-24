@@ -188,26 +188,49 @@ class Tween(QObject):
         self._anim = QVariantAnimation(self)
         self._anim.valueChanged.connect(self._tick)
         self._anim.finished.connect(self._settle)
+        self._stopping = False                 # 主动 stop 期间抑制 _settle
 
     # ------------------------------------------------------------------ #
     def value(self) -> float:
         return self._value
 
+    def _stop(self):
+        """停掉在跑的补间，并且不让 finished 回调把值改成「旧终点」。
+
+        `QVariantAnimation.stop()` 会同步发 `finished`；若任由 `_settle` 落地，
+        它写的是**上一条动画的目标值**，不是当前位置。导航双选中的根因就在这：
+        切页时旧补间刚启动还没跑第一帧（`_value` 仍是 0），`to(0.0)` 命中
+        「值已到位」的早退；旧动画没停，最后自己跑到 1.0，于是「未选中的项
+        也亮着」。所以停旧动画必须先于目标比较，且停止本身不能改值。
+        """
+        if self._anim.state() == QAbstractAnimation.State.Stopped:
+            return
+        self._stopping = True
+        try:
+            self._anim.stop()
+        finally:
+            self._stopping = False
+
     def set(self, value: float):
         """立即落到某个值（不带动画）。"""
-        self._anim.stop()
+        self._stop()
         self._value = float(value)
         self._apply(self._value)
 
     def to(self, target: float, base: Optional[int] = None, kind: Optional[str] = None):
         target = float(target)
+        # 先停旧补间：否则它会在反方向上继续跑，把值带到错误终点
+        self._stop()
         if abs(target - self._value) < 1e-4:
+            if self._value != target:          # 抹掉 1e-4 以内的浮点残差，与调用方状态严格一致
+                self._value = target
+                self._apply(target)
             return
         ms = duration(base if base is not None else self._base)
         if ms <= 0:
-            self.set(target)
+            self._value = target
+            self._apply(target)
             return
-        self._anim.stop()
         self._anim.setStartValue(self._value)
         self._anim.setEndValue(target)
         self._anim.setDuration(ms)
@@ -219,6 +242,8 @@ class Tween(QObject):
         self._apply(self._value)
 
     def _settle(self):
+        if self._stopping:
+            return
         self._value = float(self._anim.endValue())
         self._apply(self._value)
 
