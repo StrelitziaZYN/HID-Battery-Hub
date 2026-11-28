@@ -1,5 +1,8 @@
 """电量统计页：设备选择 + 24 小时 / 7 天 / 30 天图表 + 续航估算 + 采样间隔 + 清除记录。
 
+统计按「设备身份」聚合：同一台设备换 2.4G / 有线 / 蓝牙后仍是同一条曲线，
+切换连接方式不会多出一条设备、也不会把同一次放电算两遍。
+
 续航估算基于最近 30 天的充放电记录，给两个数：「预计还能用」按近期掉电速度算，
 「满电最长可用」按 30 天内每次充满后放电循环折算取最长。
 图表固定 3:2 宽高比（宽度随窗口变化，高度按比例反推），
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QScrollAr
 from . import history, i18n, theme
 from .chart import LineChart
 from .profiles import save_config
+from .scanner import connection_label
 from .widgets import DragArea, FlatButton, IconButton, Segmented, Surface
 
 RANGE_LABELS = [("24h", "24 小时"), ("7d", "7 天"), ("30d", "30 天")]
@@ -52,9 +56,9 @@ class HistoryPage(QWidget):
     def __init__(self, embedded: bool = False, config: dict | None = None, parent=None):
         super().__init__(parent)
         self.config = config if config is not None else {}
-        self._uid = ""
+        self._did = ""
         self._range = "24h"
-        self._confirm_uid = ""
+        self._confirm_did = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0 if embedded else 16, 0 if embedded else 12,
@@ -218,28 +222,31 @@ class HistoryPage(QWidget):
 
     # ------------------------------------------------------------------ #
     def reload(self) -> None:
-        """打开页面时重建设备列表并重绘。"""
+        """打开页面时重建设备列表并重绘。设备按身份合并，换过连接方式也只出现一次。"""
         self._reset_confirm()
         self._sync_record_interval()
         devices = history.devices()
         self.combo.blockSignals(True)
         self.combo.clear()
         for dev in devices:
-            self.combo.addItem(dev["name"], dev["uid"])
+            label = dev["name"]
+            if dev.get("last_conn") is not None:
+                label = f"{label} · {i18n.T(connection_label(dev['last_conn']))}"
+            self.combo.addItem(label, dev["did"])
         self.combo.blockSignals(False)
 
         if not devices:
-            self._uid = ""
+            self._did = ""
             self._show_empty(True)
             return
 
         idx = 0
         for i, dev in enumerate(devices):
-            if dev["uid"] == self._uid:
+            if dev["did"] == self._did:
                 idx = i
                 break
         self.combo.setCurrentIndex(idx)
-        self._uid = self.combo.itemData(idx) or devices[0]["uid"]
+        self._did = self.combo.itemData(idx) or devices[0]["did"]
         self._show_empty(False)
         self.refresh()
 
@@ -255,27 +262,36 @@ class HistoryPage(QWidget):
 
     def refresh(self) -> None:
         """按当前设备与区间重画（主程序每次采样后调用）。"""
-        uid = self._uid
-        if not uid:
+        did = self._did
+        if not did:
             self._show_empty(True)
             return
         span, _bucket, fmt = history.RANGES[self._range]
         now = int(time.time())
-        pts = history.points(uid, self._range, now)
-        self.chart.set_data(pts, span, fmt, now=now)
+        pts = history.points(did, self._range, now)
+        seg = history.spans(did, self._range, now)
+        self.chart.set_data(pts, span, fmt, now=now, charging_spans=seg["charging"])
 
-        st = history.stats(uid, self._range, now)
+        st = history.stats(did, self._range, now)
         if st["count"]:
             span_text = i18n.T(dict(RANGE_LABELS)[self._range])
-            self.stats.setText(i18n.TF(
+            text = i18n.TF(
                 "{}：最低 {}% · 最高 {}% · 平均 {}% · {} 次采样",
-                span_text, st['min'], st['max'], st['avg'], st['count']))
+                span_text, st['min'], st['max'], st['avg'], st['count'])
+            extra = []
+            if seg["charges"]:
+                extra.append(i18n.TF("{} 次充电", seg["charges"]))
+            if st["conns"] >= 2:
+                extra.append(i18n.TF("已合并 {} 种连接方式", st["conns"]))
+            if extra:
+                text = " · ".join([text, *extra])
+            self.stats.setText(text)
         else:
             self.stats.setText(i18n.T("该区间还没有采样"))
-        self._update_prediction(uid, now)
+        self._update_prediction(did, now)
 
-    def _update_prediction(self, uid: str, now: int) -> None:
-        info = history.predict(uid, now)
+    def _update_prediction(self, did: str, now: int) -> None:
+        info = history.predict(did, now)
         if info.get("ready"):
             self.predict_title.setText(i18n.TF("预计还能用 {}", _duration(info['hours'])))
             self.predict_sub.setText(i18n.TF(
@@ -291,7 +307,7 @@ class HistoryPage(QWidget):
                 self.predict_sub.setText(
                     i18n.T("需要至少 3 次放电采样，且间隔覆盖半小时以上"))
 
-        end = history.endurance(uid, now)
+        end = history.endurance(did, now)
         if end.get("ready"):
             self.endurance_title.setText(i18n.TF("满电最长可用 {}", _span(end['hours'])))
             self.endurance_sub.setText(i18n.TF(
@@ -311,9 +327,9 @@ class HistoryPage(QWidget):
 
     # ------------------------------------------------------------------ #
     def _on_device_changed(self, index: int) -> None:
-        uid = self.combo.itemData(index)
-        if uid:
-            self._uid = str(uid)
+        did = self.combo.itemData(index)
+        if did:
+            self._did = str(did)
             self._reset_confirm()
             self.refresh()
 
@@ -334,33 +350,33 @@ class HistoryPage(QWidget):
         self.config_changed.emit()
 
     def _clear_device(self) -> None:
-        if not self._uid:
+        if not self._did:
             return
-        if self._confirm_uid != self._uid:
-            self._confirm_uid = self._uid
+        if self._confirm_did != self._did:
+            self._confirm_did = self._did
             self.btn_clear.setText(i18n.T("再点一次确认清除"))
             self._confirm_timer.start()
             return
-        history.clear_device(self._uid)
+        history.clear_device(self._did)          # 连同该设备所有连接来源的记录一起清除
         self._reset_confirm()
         self.reload()
 
     def _clear_all(self) -> None:
-        if self._confirm_uid != "*":
-            self._confirm_uid = "*"
+        if self._confirm_did != "*":
+            self._confirm_did = "*"
             self.btn_clear_all.setText(i18n.T("再点一次确认"))
             self._confirm_timer.start()
             return
         history.clear_all()
         self._reset_confirm()
-        self._uid = ""
+        self._did = ""
         self.reload()
 
     def _reset_confirm(self) -> None:
-        self._confirm_uid = ""
+        self._confirm_did = ""
         self.btn_clear.setText(i18n.T("清除该设备记录"))
         self.btn_clear_all.setText(i18n.T("全部清除"))
-        self.btn_clear.setEnabled(bool(self._uid))
+        self.btn_clear.setEnabled(bool(self._did))
         self.btn_clear_all.setEnabled(bool(history.devices()))
 
     # ------------------------------------------------------------------ #

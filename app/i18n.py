@@ -281,6 +281,8 @@ _EN: dict[str, str] = {
     "{}：最低 {}% · 最高 {}% · 平均 {}% · {} 次采样":
         "{}: min {}% · max {}% · avg {}% · {} samples",
     "该区间还没有采样": "No samples in this range yet",
+    "{} 次充电": "{} charging session(s)",
+    "已合并 {} 种连接方式": "{} connection modes merged",
     "预计还能用 {}": "Estimated time left: {}",
     "当前 {}% · 近 {} 天 {} 段放电 · 平均掉电 {}/小时 · 数据覆盖 {}":
         "Now {}% · {} discharge segment(s) in the last {} days · avg drain {} per hour · data covers {}",

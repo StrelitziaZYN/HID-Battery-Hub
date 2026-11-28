@@ -6,13 +6,13 @@ A tiny Windows tray utility that reads the **battery level** of wireless mice, k
 
 Single portable EXE — unzip and run. No drivers, no administrator rights.
 
-Current version **v1.5.1** · [Download the latest release](https://github.com/StrelitziaZYN/HID-Battery-Hub/releases/latest)
+Current version **v1.6.0** · [Download the latest release](https://github.com/StrelitziaZYN/HID-Battery-Hub/releases/latest)
 
 ## Features
 
 - **Tray battery**: the icon fills by the lowest battery level — amber at ≤30%, red at ≤15%, with a bolt overlay while charging. No pop-ups, no interruptions.
 - **Flyout panel**: click the tray icon to see every device — icon, name, connection type, battery, last update. Click elsewhere and it slides away.
-- **Battery history**: 24-hour / 7-day / 30-day curves, recorded per device.
+- **Battery history**: 24-hour / 7-day / 30-day curves, merged per device — one curve spans 2.4G / wired / Bluetooth switches without breaks or double counting.
 - **Endurance estimates**: based on the last **30 days** of charge/discharge records you get two numbers — "estimated time left" from the median drain rate of recent discharge segments, and "full-charge endurance" from the longest full-charge-to-0% cycle, with the median as reference.
 - **Multi-vendor**: MCHOSE and Flydigi protocols are built in. For anything else, use the self-onboarding flow: *detect device → build prompt → hand it to an AI → drop the returned access bundle into the window*. No app update required.
 - **Bring your own icons**: upload a PNG (auto-cropped to 128 px) per device. The app never fetches images from the internet.

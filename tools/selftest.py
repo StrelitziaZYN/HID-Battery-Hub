@@ -155,31 +155,160 @@ def t_icon_roundtrip():
 
 
 def t_history():
-    """历史库：写样本 → 聚合 → 预测 → 清除，全程用临时设备 uid，不污染真实数据。"""
-    uid = "TEST:SELFTEST"
-    history.clear_device(uid)
+    """历史库：写样本 → 聚合 → 预测 → 清除，全程用临时库与临时设备身份，不污染真实数据。"""
+    import os
+    import shutil
+    import tempfile
+
+    from app import history
+    from app.device_identity import device_key
+
+    tmp = tempfile.mkdtemp(prefix="hidbatt-hist-")
+    old_sub, old_db = history.DATA_SUBDIR, history.HISTORY_DB
+    history.DATA_SUBDIR, history.HISTORY_DB = tmp, os.path.join(tmp, "history.db")
+    dev = {"uid": "TEST:HIST", "name": "自检设备", "vendor": "TEST", "vendor_id": 0x1234,
+           "real_vid": 0x1234, "real_pid": 0x0A0A, "charging": False, "connection": 2}
+    did = device_key(dev)
     now = int(time.time())
-    with history._db() as conn:
-        for i in range(13):                        # 6 小时，每 30 分钟掉 5%
-            ts = now - (12 - i) * 1800
-            conn.execute("INSERT INTO samples(uid, name, percent, charging, ts) VALUES(?,?,?,?,?)",
-                         (uid, "自检设备", 100 - i * 5, 0, ts))
-        conn.execute("INSERT INTO devices(uid, name, vendor, first_ts, last_ts, last_percent) "
-                     "VALUES(?,?,?,?,?,?)", (uid, "自检设备", "TEST", now - 21600, now, 40))
     try:
-        pts = history.points(uid, "24h", now)
+        for i in range(13):                        # 6 小时，每 30 分钟掉 5%
+            history.record([{**dev, "percent": 100 - i * 5}], 300, now - (12 - i) * 1800)
+        pts = history.points(did, "24h", now)
         assert len(pts) >= 5, "24 小时聚合点太少"
-        st = history.stats(uid, "24h", now)
-        assert st["count"] == 13 and st["min"] == 40, "统计不正确"
-        pred = history.predict(uid, now)
+        st = history.stats(did, "24h", now)
+        assert st["count"] == 13 and st["min"] == 40, f"统计不正确：{st}"
+        pred = history.predict(did, now)
         assert pred["ready"] and 0 < pred["hours"] < 24, f"预测异常：{pred}"
         assert abs(pred["rate"] - 10) < 1.0, f"掉电速率异常：{pred['rate']}"
-        assert history.record([{"uid": uid, "name": "自检设备", "percent": 40}], 300, now) == 0, \
+        assert history.record([{**dev, "percent": 40}], 300, now) == 0, \
             "节流没生效（同一时刻重复写入了）"
+        history.clear_device(did)
+        assert not history.has_data(did), "清除失败"
     finally:
-        history.clear_device(uid)
-    assert not history.has_data(uid), "清除失败"
-    return f"聚合 {len(pts)} 点、预测 {pred['hours']:.1f}h / {pred['rate']}%/h、清除通过"
+        history.DATA_SUBDIR, history.HISTORY_DB = old_sub, old_db
+        shutil.rmtree(tmp, ignore_errors=True)
+    return f"聚合 {len(pts)} 点、预测 {pred['hours']:.1f}h / {pred['rate']}%/h、节流通过"
+
+
+def t_history_merge():
+    """同一设备换连接方式：一条曲线、一份总量；多路同时在线不重复记账。"""
+    import os
+    import shutil
+    import sqlite3
+    import tempfile
+
+    from app import device_identity, history
+
+    tmp = tempfile.mkdtemp(prefix="hidbatt-merge-")
+    old_sub, old_db = history.DATA_SUBDIR, history.HISTORY_DB
+    history.DATA_SUBDIR, history.HISTORY_DB = tmp, os.path.join(tmp, "history.db")
+    now = int(time.time())
+    name = "MCHOSE A7 V3 Pro"
+    base = {"name": name, "model": name, "vendor": "MCHOSE 迈丛", "vendor_id": 0x3837}
+    # 同一台设备的三条通道：VID/PID/接口号都不同，真机型号相同
+    wired = {**base, "uid": "3837:2025:1", "product_id": 0x2025,
+             "real_vid": 0x3837, "real_pid": 0x4025, "connection": 1, "serial_number": "AAA111"}
+    dongle = {**base, "uid": "3837:2026:2", "product_id": 0x2026,
+              "real_vid": 0x3837, "real_pid": 0x4025, "connection": 2, "serial_number": "RECV99"}
+    bluetooth = {**base, "uid": "3837:2027:3", "product_id": 0x2027,
+                 "real_vid": 0x3837, "real_pid": 0x4025, "connection": 3, "serial_number": "BT77"}
+
+    try:
+        did = device_identity.device_key(wired)
+        assert did == "hw-3837-4025", f"身份应取真机型号：{did}"
+        # 序列号本来就会随通道变化，不能拿它拆设备（设计取舍，回归保护）
+        for dev in (dongle, bluetooth):
+            assert device_identity.device_key(dev) == did, "同一设备不同通道的身份必须一致"
+
+        # 1) 三个连接方式各 5 条，间隔 30 分钟，100% → 58% 连续下降
+        written = sum(history.record([{**(wired, dongle, bluetooth)[i // 5],
+                                       "percent": 100 - i * 3}], 300,
+                                     now - (14 - i) * 1800) for i in range(15))
+        assert written == 15, f"应写入 15 条，实际 {written}"
+
+        devs = history.devices()
+        assert len(devs) == 1, f"应按身份合并成 1 台，实际 {len(devs)} 台：{[d['did'] for d in devs]}"
+        assert devs[0]["did"] == did and devs[0]["samples"] == 15, f"合并后样本数不对：{devs[0]}"
+        assert devs[0]["sources"] == 3 and devs[0]["conns"] == 3, \
+            f"来源/连接方式统计不对：{devs[0]}"
+
+        st = history.stats(did, "24h", now)
+        assert st["count"] == 15, f"切换连接方式后采样次数应连续为 15，实际 {st['count']}"
+        assert st["min"] == 58 and st["max"] == 100, f"合并后总量区间不对：{st}"
+        pts = history.points(did, "24h", now)
+        assert pts[0][0] <= now - 14 * 1800 + 900 and pts[-1][0] >= now - 900, \
+            "曲线没有覆盖切换前后的完整时段"
+
+        # 2) 同一轮里两路同时在线：只落一条，电量取大、充电取或
+        t = now + 3600
+        assert history.record([{**wired, "percent": 74},
+                               {**dongle, "percent": 76, "charging": True}], 300, t) == 1, \
+            "同一轮多路通道应只写一条样本"
+        with history._db() as conn:
+            row = conn.execute("SELECT percent, charging, conn FROM samples "
+                               "WHERE did=? ORDER BY ts DESC LIMIT 1", (did,)).fetchone()
+        assert row[0] == 76 and row[1] == 1, f"多路合并取值不对：{row}"
+
+        # 3) 刚记过就切通道：按身份节流，不应再写一条（否则总量翻倍）
+        assert history.record([{**bluetooth, "percent": 75}], 300, t + 60) == 0, \
+            "切换连接方式后重复写入，总量会翻倍"
+
+        # 4) 充电时段明细：样本按身份连续，充电段不会被通道切换切断
+        seg = history.spans(did, "24h", t + 60)
+        assert seg["charges"] == 1 and seg["discharges"] == 1, f"充放电段统计不对：{seg}"
+        assert seg["charging"] and seg["charging"][0][0] == t, f"充电时段起点不对：{seg}"
+
+        # 5) 旧库迁移：只有 HID uid 的记录按「VID + 型号名」并成一台，并可被新身份接管
+        legacy_db = os.path.join(tmp, "legacy.db")
+        conn = sqlite3.connect(legacy_db)
+        conn.executescript(
+            "CREATE TABLE samples (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL,"
+            " name TEXT NOT NULL DEFAULT '', percent INTEGER NOT NULL,"
+            " charging INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL);"
+            "CREATE TABLE devices (uid TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',"
+            " vendor TEXT NOT NULL DEFAULT '', first_ts INTEGER NOT NULL DEFAULT 0,"
+            " last_ts INTEGER NOT NULL DEFAULT 0, last_percent INTEGER);")
+        for i in range(6):
+            uid = "3837:2025:1" if i < 3 else "3837:2026:2"     # 有线 3 条 + 2.4G 3 条
+            ts = now - (5 - i) * 1800
+            conn.execute("INSERT INTO samples(uid, name, percent, charging, ts) "
+                         "VALUES(?,?,?,?,?)", (uid, name, 90 - i * 4, 0, ts))
+            conn.execute("INSERT INTO devices(uid, name, vendor, first_ts, last_ts, last_percent) "
+                         "VALUES(?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET "
+                         "last_ts=excluded.last_ts, last_percent=excluded.last_percent",
+                         (uid, name, "MCHOSE 迈丛", ts, ts, 90 - i * 4))
+        conn.commit()
+        conn.close()
+
+        history.HISTORY_DB = legacy_db
+        legacy = history.devices()
+        assert len(legacy) == 1, f"旧库应按名称并成 1 台，实际 {len(legacy)} 台"
+        assert legacy[0]["samples"] == 6 and legacy[0]["did"].startswith("nm-3837-"), \
+            f"旧库迁移结果不对：{legacy[0]}"
+        assert len(history.points(legacy[0]["did"], "24h", now)) >= 1, "旧库迁移后查不到记录"
+
+        # 设备第一次以真机身份上线 → 旧记录并入，不出现第二条曲线
+        assert history.record([{**bluetooth, "percent": 50}], 300, now + 60) == 1
+        merged = history.devices()
+        assert len(merged) == 1 and merged[0]["did"] == did, f"旧记录没有并入新身份：{merged}"
+        assert merged[0]["samples"] == 7, f"并入后样本数应为 7，实际 {merged[0]['samples']}"
+
+        # 6) 展示：统计页只列一台设备，并标注已合并的连接方式
+        history.HISTORY_DB = os.path.join(tmp, "history.db")
+        from app.history_page import HistoryPage
+
+        page = HistoryPage(embedded=True, config={"record_interval": 300})
+        page.refresh()
+        assert page.combo.count() == 1, f"统计页应只列 1 台设备，实际 {page.combo.count()}"
+        assert page.combo.itemData(0) == did, "下拉项的聚合键不是设备身份"
+        assert "已合并" in page.stats.text(), f"统计行没有合并说明：{page.stats.text()}"
+        page.deleteLater()
+        detail = (f"{did} · 3 种连接方式并成 1 台 · 15 条样本连续 · "
+                  f"多路同轮只落 1 条 · 旧库 6 条并入")
+    finally:
+        history.DATA_SUBDIR, history.HISTORY_DB = old_sub, old_db
+        shutil.rmtree(tmp, ignore_errors=True)
+    return detail
 
 
 def t_endurance():
@@ -194,7 +323,7 @@ def t_endurance():
     old_sub, old_db = history.DATA_SUBDIR, history.HISTORY_DB
     history.DATA_SUBDIR = tmp
     history.HISTORY_DB = os.path.join(tmp, "history.db")
-    uid = "TEST:ENDURANCE"
+    uid = "TEST:ENDURANCE"                        # 这里直接当设备身份使用
     now = int(time.time())
     rows = []
     # (起点电量, 终点电量, 持续小时, 结束于几小时前)
@@ -210,9 +339,9 @@ def t_endurance():
     rows.sort(key=lambda r: r[3])
     try:
         with history._db() as conn:
-            conn.executemany("INSERT INTO samples(uid, name, percent, charging, ts) "
-                             "VALUES(?,?,?,?,?)",
-                             [(uid, "续航自检", r[1], r[2], r[3]) for r in rows])
+            conn.executemany("INSERT INTO samples(did, uid, name, percent, charging, ts) "
+                             "VALUES(?,?,?,?,?,?)",
+                             [(uid, "TEST:UID", "续航自检", r[1], r[2], r[3]) for r in rows])
         end = history.endurance(uid, now)
         assert end["ready"], f"续航估算未就绪：{end}"
         assert end["cycles"] == 3, f"循环数应为 3（60% 起步那次被忽略），实际 {end['cycles']}"
@@ -411,6 +540,12 @@ def t_scan_orchestration():
     M.scan_devices = fake_scan
     M.load_config = lambda: {"refresh_interval": 3600, "record_interval": 300,
                              "profiles": [], "notified": True}
+    # 采样会落到 history 库：指到临时目录，别把自检的假设备写进用户真实历史
+    from app import history as hist_mod
+
+    tmp = tempfile.mkdtemp(prefix="hidbatt-scan-")
+    old_sub, old_db = hist_mod.DATA_SUBDIR, hist_mod.HISTORY_DB
+    hist_mod.DATA_SUBDIR, hist_mod.HISTORY_DB = tmp, os.path.join(tmp, "history.db")
     tray = M.TrayApp(_ensure_app())
     tray.SCAN_TIMEOUT_MS = 500
     try:
@@ -448,6 +583,8 @@ def t_scan_orchestration():
         tray.tray.hide()
         tray.flyout.hide()
         M.scan_devices, M.load_config = real_scan, real_load
+        hist_mod.DATA_SUBDIR, hist_mod.HISTORY_DB = old_sub, old_db
+        shutil.rmtree(tmp, ignore_errors=True)
     return detail
 
 
@@ -774,6 +911,7 @@ def main() -> int:
                      ("提示词生成", t_prompt),
                      ("图标上传/清除", t_icon_roundtrip),
                      ("电量历史与预测", t_history),
+                     ("多连接方式合并统计", t_history_merge),
                      ("30 天满电续航估算", t_endurance),
                      ("数据目录定位", t_data_dir),
                      ("低电量配色", t_icon_colors),

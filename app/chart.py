@@ -24,6 +24,7 @@ class LineChart(QWidget):
     def __init__(self, parent=None, height: int = 168, ratio: tuple[int, int] = (3, 2)):
         super().__init__(parent)
         self._points: List[Tuple[int, float]] = []
+        self._charging: List[Tuple[int, int]] = []
         self._span = 24 * 3600
         self._now: int = 0
         self._fmt = "%H:%M"
@@ -52,8 +53,11 @@ class LineChart(QWidget):
 
     # ------------------------------------------------------------------ #
     def set_data(self, points: Sequence[Tuple[int, float]], span: int,
-                 label_fmt: str = "%H:%M", now: Optional[int] = None) -> None:
+                 label_fmt: str = "%H:%M", now: Optional[int] = None,
+                 charging_spans: Optional[Sequence[Tuple[int, int]]] = None) -> None:
+        """points 是 [(时间, 电量)]；charging_spans 是 [(起, 止)] 的充电时段，画成淡色底色。"""
         self._points = [(int(t), float(v)) for t, v in points]
+        self._charging = [(int(a), int(b)) for a, b in (charging_spans or []) if b > a]
         self._span = max(60, int(span))
         self._fmt = label_fmt
         self._now = int(now if now is not None else
@@ -91,6 +95,20 @@ class LineChart(QWidget):
         p.setPen(pen)
         p.drawLine(QPointF(plot.left(), ty), QPointF(plot.right(), ty))
 
+        start = self._now - self._span
+        # 充电时段底色：按设备身份连续绘出，切换连接方式也不会断成两块
+        if self._charging:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(46, 160, 67, 26))
+            for begin, finish in self._charging:
+                x0 = plot.left() + (max(begin, start) - start) / self._span * plot.width()
+                x1 = plot.left() + (min(finish, self._now) - start) / self._span * plot.width()
+                if x1 <= plot.left() or x0 >= plot.right():
+                    continue
+                x0 = max(x0, plot.left())
+                x1 = min(x1, plot.right())
+                p.drawRect(QRectF(x0, plot.top(), max(1.5, x1 - x0), plot.height()))
+
         if len(self._points) < 2:
             p.setPen(QPen(theme.C.TEXT_TERTIARY))
             p.setFont(theme.ui_font(8))
@@ -99,7 +117,6 @@ class LineChart(QWidget):
             self._draw_x_axis(p, plot, small)
             return
 
-        start = self._now - self._span
         xs = [plot.left() + (t - start) / self._span * plot.width() for t, _ in self._points]
         ys = [plot.bottom() - max(0.0, min(100.0, v)) / 100.0 * plot.height()
               for _, v in self._points]
